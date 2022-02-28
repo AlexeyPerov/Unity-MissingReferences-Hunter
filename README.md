@@ -19,7 +19,9 @@ Then it reads the contents off all GameObjects, ScriptableObjects and Scenes to 
 Then it simply checks whether this GUIDs are present in the map form the first step.
 
 It also checks whether GameObjects, ScriptableObjects and Scenes contain local references (e.g. fileID) to non existing parts of itself.
-All occurences of {fileID: 0} are also treated as warning because they might represented forgotten references.
+All occurences of {fileID: 0} are also treated as warning because they might be forgotten references.
+
+The whole process might take few minutes for huge projects.
 
 ## To list all missing references in your project..
 ..click on "Tools/Missing References Hunter" option which will open the window.
