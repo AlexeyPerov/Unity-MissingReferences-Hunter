@@ -45,4 +45,16 @@ The whole process might take few minutes for huge projects.
 ## Contributions
 
 Feel free to [report bugs, request new features](https://github.com/AlexeyPerov/Unity-MissingReferences-Hunter/issues) 
-or to [contribute](https://github.com/AlexeyPerov/Unity-MissingReferences-Hunter/pulls) to this project! 
+or to [contribute](https://github.com/AlexeyPerov/Unity-MissingReferences-Hunter/pulls) to this project!
+
+## Other tools
+
+##### Dependencies Hunter
+
+To find unreferenced assets in Unity project see [Dependencies-Hunter](https://github.com/AlexeyPerov/Unity-Dependencies-Hunter).
+
+##### Textures Hunter
+
+To analyze your textures and atlases see [Textures-Hunter](https://github.com/AlexeyPerov/Unity-Textures-Hunter).
+
+ 
