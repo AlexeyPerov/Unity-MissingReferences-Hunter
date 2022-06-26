@@ -1,3 +1,5 @@
+// #define LOGS
+
 using System;
 using System.Collections.Generic;
 using System.IO;
@@ -5,6 +7,7 @@ using System.Linq;
 using System.Text.RegularExpressions;
 using UnityEditor;
 using UnityEngine;
+
 // ReSharper disable StringLiteralTypo
 // ReSharper disable UnusedAutoPropertyAccessor.Global
 // ReSharper disable MemberCanBePrivate.Global
@@ -82,8 +85,39 @@ namespace MissingReferencesHunter
         {
             GetWindow<MissingReferencesWindow>();
         }
+        
+        [MenuItem("Assets/Find Missing References", false, 20)]
+        public static void FindReferences()
+        {
+            var window = GetWindow<MissingReferencesWindow>();
+            window.PopulateMissingReferencesForFiles();
+        }
 
-        private void PopulateMissingReferencesList()
+        public void PopulateMissingReferencesForFiles()
+        {
+            Show();
+
+            var filesToAnalyze = new List<string>();
+            var selected = Selection.objects;
+
+            foreach (var selectedObject in selected)
+            {
+                var selectedObjectPath = AssetDatabase.GetAssetPath(selectedObject);
+                if (!string.IsNullOrWhiteSpace(selectedObjectPath))
+                {
+                    filesToAnalyze.Add(selectedObjectPath);
+                    Debug.Log("Selected: " + selectedObjectPath);
+                }
+            }
+
+            PopulateMissingReferencesList(filesToAnalyze);
+        }
+
+        /// <summary>
+        /// Finds missing references.
+        /// </summary>
+        /// <param name="filesToAnalyze">If empty then script performs all files analysis</param>
+        private void PopulateMissingReferencesList(List<string> filesToAnalyze)
         {
             _result = new Result();
             _outputSettings = new OutputSettings
@@ -109,8 +143,13 @@ namespace MissingReferencesHunter
                 count++;
 
                 var guid = AssetDatabase.GUIDFromAssetPath(assetPath);
-                _result.Guids.Add(guid.ToString());
-                
+
+                var guidStr = guid.ToString();
+                _result.Guids.Add(guidStr);
+
+                if (filesToAnalyze.Count > 0 && !filesToAnalyze.Contains(assetPath))
+                    continue;
+
                 var isIncluded = IsIncludedInAnalysis(assetPath);
                 
                 if (!isIncluded)
@@ -190,6 +229,7 @@ namespace MissingReferencesHunter
                                 {
 #if LOGS
                                     Debug.Log($"Found Guid: {externalGuid} [Length: {externalGuid.Length}] at {index}");
+                                    Debug.Log( AssetDatabase.GUIDToAssetPath(externalGuid));
 #endif
                                     refsData.ExternalGuids.Add(new ExternalGuidRegistry(externalGuid, index));
                                 }
@@ -332,7 +372,17 @@ namespace MissingReferencesHunter
 
             bool CanAnalyzeType(Type type)
             {
-                return type == typeof(GameObject) || type == typeof(ScriptableObject) || type == typeof(SceneAsset);
+                return type == typeof(GameObject) || type == typeof(SceneAsset) 
+                                                  || DerivesFromOrEqual(type, typeof(ScriptableObject));
+            }
+            
+            static bool DerivesFromOrEqual(Type a, Type b)
+            {
+#if UNITY_WSA && ENABLE_DOTNET && !UNITY_EDITOR
+                return b == a || b.GetTypeInfo().IsAssignableFrom(a.GetTypeInfo());
+#else
+                return b == a || b.IsAssignableFrom(a);
+#endif
             }
         }
 
@@ -367,7 +417,7 @@ namespace MissingReferencesHunter
             
             if (GUILayout.Button("Run Analysis", GUILayout.Width(300f)))
             {
-                PopulateMissingReferencesList();
+                PopulateMissingReferencesList(new List<string>());
             }
             
             GUI.color = prevColor;
