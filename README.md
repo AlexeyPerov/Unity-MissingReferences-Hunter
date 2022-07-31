@@ -16,21 +16,21 @@ At first, it collects all your project GUIDs and forms a map of them.
 
 Then it reads the contents off all GameObjects, ScriptableObjects and Scenes to gather GUIDs they contain.
 
-Then it simply checks whether this GUIDs are present in the map form the first step.
+Then it simply checks whether these GUIDs are present in the map form the first step.
 
 It also checks whether GameObjects, ScriptableObjects and Scenes contain local references (e.g. fileID) to non existing parts of itself.
-All occurences of {fileID: 0} are also treated as warning because they might be forgotten references.
+All occurrences of {fileID: 0} are also treated as warning because they might be forgotten references.
 
 The whole process might take few minutes for huge projects.
 
-## To list all missing references in your project..
+## To list all missing references in your project...
 ..click on "Tools/Missing References Hunter" option which will open the window. 
 
 Press "Run Analysis" button to run the analysis (can take several minutes depending on the size of your project).
 
 ![plot](./Screenshots/main_window.png)
 
-## To list missing references for selected assets..
+## To list missing references for selected assets...
 ..click on "Find Missing References" option in the context menu.
 
 ![plot](./Screenshots/selected_menu.png)
@@ -44,7 +44,7 @@ It will launch the analysis and show the results as they are ready.
 ![plot](./Screenshots/missing_reference_example.png)
 
 [Local Refs Warnings] - assets that has:
-* internal refs to child objects that no longer exists
+* internal refs to child objects that no longer exist
 * internal refs with null values e.g. empty array item
 
 [Assets With No Warnings] - assets with valid references only
