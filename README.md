@@ -24,9 +24,21 @@ All occurences of {fileID: 0} are also treated as warning because they might be 
 The whole process might take few minutes for huge projects.
 
 ## To list all missing references in your project..
-..click on "Tools/Missing References Hunter" option which will open the window.
+..click on "Tools/Missing References Hunter" option which will open the window. 
+
+Press "Run Analysis" button to run the analysis (can take several minutes depending on the size of your project).
 
 ![plot](./Screenshots/main_window.png)
+
+## To list missing references for selected assets..
+..click on "Find Missing References" option in the context menu.
+
+![plot](./Screenshots/selected_menu.png)
+
+It will launch the analysis and show the results as they are ready.
+![plot](./Screenshots/selected_result.png)
+
+## Working with results
 
 [Unknown Guids] - assets that has references to assets that no longer exists (like on the screenshot below)
 ![plot](./Screenshots/missing_reference_example.png)
