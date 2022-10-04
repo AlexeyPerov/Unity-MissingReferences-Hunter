@@ -376,7 +376,7 @@ namespace MissingReferencesHunter
                                                   || DerivesFromOrEqual(type, typeof(ScriptableObject));
             }
             
-            static bool DerivesFromOrEqual(Type a, Type b)
+            bool DerivesFromOrEqual(Type a, Type b)
             {
 #if UNITY_WSA && ENABLE_DOTNET && !UNITY_EDITOR
                 return b == a || b.GetTypeInfo().IsAssignableFrom(a.GetTypeInfo());
