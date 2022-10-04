@@ -142,9 +142,8 @@ namespace MissingReferencesHunter
                     (float) count / assetPaths.Count);
                 count++;
 
-                var guid = AssetDatabase.GUIDFromAssetPath(assetPath);
+                var guidStr = AssetDatabase.AssetPathToGUID(assetPath);
 
-                var guidStr = guid.ToString();
                 _result.Guids.Add(guidStr);
 
                 if (filesToAnalyze.Count > 0 && !filesToAnalyze.Contains(assetPath))
@@ -281,7 +280,7 @@ namespace MissingReferencesHunter
                     }
                 }
                 
-                _result.Assets.Add(new AssetData(assetPath, type, typeName, guid, refsData));
+                _result.Assets.Add(new AssetData(assetPath, type, typeName, guidStr, refsData));
             }
             
             foreach (var asset in _result.Assets)
@@ -624,7 +623,7 @@ namespace MissingReferencesHunter
                 
                 prevColor = GUI.color;
                 GUI.color = Color.gray;
-                EditorGUILayout.LabelField(asset.GuidContents, GUILayout.Width(250f));
+                EditorGUILayout.LabelField(asset.Guid, GUILayout.Width(250f));
                 GUI.color = prevColor;
                 
                 EditorGUILayout.LabelField(asset.Path);
@@ -702,21 +701,19 @@ namespace MissingReferencesHunter
     
     public class AssetData
     {
-        public AssetData(string path, Type type, string typeName, GUID guid, AssetReferencesData refsData)
+        public AssetData(string path, Type type, string typeName, string guid, AssetReferencesData refsData)
         {
             Path = path;
             Type = type;
             TypeName = typeName;
             Guid = guid;
-            GuidContents = guid.Empty() ? string.Empty : guid.ToString();
             RefsData = refsData;
         }
 
         public string Path { get; }
         public Type Type { get; }
         public string TypeName { get; }
-        public GUID Guid { get; }
-        public string GuidContents { get; }
+        public string Guid { get; }
         public AssetReferencesData RefsData { get; }
         public bool ValidType => Type != null;
     }
