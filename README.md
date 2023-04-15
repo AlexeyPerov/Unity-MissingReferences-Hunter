@@ -16,7 +16,7 @@ At first, it collects all your project GUIDs and forms a map of them.
 
 Then it reads the contents off all GameObjects, ScriptableObjects and Scenes to gather GUIDs they contain.
 
-Then it simply checks whether these GUIDs are present in the map form the first step.
+Then it simply checks whether these GUIDs are present in the map from the first step.
 
 It also checks whether GameObjects, ScriptableObjects and Scenes contain local references (e.g. fileID) to non existing parts of itself.
 All occurrences of {fileID: 0} are also treated as warning because they might be forgotten references.
