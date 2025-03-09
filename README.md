@@ -30,24 +30,59 @@ Press "Run Analysis" button to run the analysis (can take several minutes depend
 
 ![plot](./Screenshots/main_window.png)
 
-## To list missing references for selected assets...
-..click on "Find Missing References" option in the context menu.
-
-![plot](./Screenshots/selected_menu.png)
-
-It will launch the analysis and show the results as they are ready.
-![plot](./Screenshots/selected_result.png)
-
 ## Working with results
 
-[Unknown Guids] - assets that has references to assets that no longer exists (like on the screenshot below)
+* [Missing FileID and Guid] - in 100% of cases indicates an error like on the screenshot below
 ![plot](./Screenshots/missing_reference_example.png)
 
-[Local Refs Warnings] - assets that has:
-* internal refs to child objects that no longer exist
-* internal refs with null values e.g. empty array item
+* [Missing Guid] - most likely indicates an error. Sometimes missing GUID can be compensated by FileID 
+so we are not 100% that there is a problem. However the tool still marks it as a warning for you to investigate
 
-[Assets With No Warnings] - assets with valid references only
+* Other FileID issues most likely do not indicate errors and are hidden by default
+
+## How it works
+
+Unity uses FileID and GUID entities to identify and assign assets to each other
+This tool scans all assets to find all FileIDs and / or GUIDs that are assigned to a field
+but do not exist neither in current asset nor in all project
+
+
+There are several types of issues that might occur during this analysis
+
+* [Missing FileID and Guid] - both identifiers do not exist
+
+
+in that case we are 100% sure that there is a missing reference so we mark it with red color
+
+* [Missing Guid] - only Guid does not exist
+* [Missing FileId] - only FileId does not exist
+
+this issues need further investigation by you because there might be or not a missing reference since it can be somehow processed by some internal Unity code
+
+
+[Missing FileId] usually involves more internal nuances and less likely indicates an error and so we mark it as non-warning (cyan)
+
+however [Missing Guid] most of the times indicates that there are some errors so we mark it as yellow
+
+```
+In most cases you just need to fix [Missing FileID and Guid] and [Missing Guid] issues
+```
+
+That is why other filters are hidden by default and most of the users won't need them
+
+* please also note that not all missing references are presented in Unity inspector
+* some of them might be hidden if current serialization doesn't cover fields that contain errors
+* or some of them might be replaced by custom inspectors etc
+
+* so in some cases you need to enable Debug inspector view or even dive into the asset file text contents
+
+
+This tool also collects some other info:
+
+* [Missing Local FileID] - might indicate that there is some issue with internal objects referencing each other
+* [Empty Local FileID] - might indicate an empty internal field 
+
+these two fields provide some very specific info that is rarely needed for most of users
 
 ## Installation
 
@@ -63,11 +98,11 @@ or to [contribute](https://github.com/AlexeyPerov/Unity-MissingReferences-Hunter
 
 ##### Dependencies Hunter
 
-To find unreferenced assets in Unity project see [Dependencies-Hunter](https://github.com/AlexeyPerov/Unity-Dependencies-Hunter).
+- To find unreferenced assets in Unity project see [Dependencies-Hunter](https://github.com/AlexeyPerov/Unity-Dependencies-Hunter).
 
 ##### Textures Hunter
 
-To analyze your textures and atlases see [Textures-Hunter](https://github.com/AlexeyPerov/Unity-Textures-Hunter).
+- To analyze your textures and atlases see [Textures-Hunter](https://github.com/AlexeyPerov/Unity-Textures-Hunter).
 
  ##### Editor Coroutines
 
