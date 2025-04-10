@@ -43,6 +43,7 @@ so we are not 100% that there is a problem. However the tool still marks it as a
 ## How it works
 
 Unity uses FileID and GUID entities to identify and assign assets to each other
+
 This tool scans all assets to find all FileIDs and / or GUIDs that are assigned to a field
 but do not exist neither in current asset nor in all project
 
