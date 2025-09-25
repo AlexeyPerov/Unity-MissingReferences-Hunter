@@ -8,7 +8,7 @@
 This tool detects missing references in your assets.
 
 All code combined into one script for easier portability.
-So you can just copy-paste [MissingReferencesHunter.cs](./Packages/MissingRefsHunter/Editor/MissingReferencesHunter.cs) to your project in any Editor folder.
+So you can just copy-paste [MissingReferencesHunter.cs](./Editor/MissingReferencesHunter.cs) to your project in any Editor folder.
 
 # How it works
 
@@ -87,8 +87,8 @@ these two fields provide some very specific info that is rarely needed for most 
 
 ## Installation
 
- 1. Just copy and paste file [MissingReferencesHunter.cs](./Packages/MissingRefsHunter/Editor/MissingReferencesHunter.cs) inside Editor folder
- 2. [WIP] via Unity's Package Manager 
+ 1. Just copy and paste file [MissingReferencesHunter.cs](./Editor/MissingReferencesHunter.cs) inside Editor folder
+ 2. via Unity's Package Manager 
 
 ## Contributions
 
