@@ -5,6 +5,7 @@ using System.Collections;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Reflection;
 using System.Text.RegularExpressions;
 using UnityEditor;
 using UnityEngine;
@@ -35,6 +36,13 @@ namespace MissingReferencesHunter
             public int MissingGuidCases { get; set; }
             public int MissingLocalFileIDCases { get; set; }
             public int EmptyFileIDCases { get; set; }
+
+            public int MissingMethodCases { get; set; }
+            public int TypeMismatchCases { get; set; }
+
+            public int MissingScriptCases { get; set; }
+            public int DuplicateComponentCases { get; set; }
+            public int InvalidLayerCases { get; set; }
         }
 
         private class OutputSettings
@@ -52,6 +60,13 @@ namespace MissingReferencesHunter
             public bool ShowEmptyLocalRefs { get; set; }
             public bool ShowFileIDIssues { get; set; }
 
+            public bool ShowMissingMethods { get; set; } = true;
+            public bool ShowTypeMismatches { get; set; } = true;
+
+            public bool ShowMissingScripts { get; set; } = true;
+            public bool ShowDuplicateComponents { get; set; } = true;
+            public bool ShowInvalidLayers { get; set; } = true;
+
             public HashSet<string> FieldTypesToShow { get; } = new HashSet<string>();
         }
         
@@ -61,6 +76,13 @@ namespace MissingReferencesHunter
         private bool _analysisOngoing;
 
         private bool _infoFoldout;
+        private bool _settingsFoldout;
+        
+        private bool _enableMissingMethodScan = true;
+        private bool _enableTypeMismatchScan = true;
+        private bool _enableMissingScriptScan = true;
+        private bool _enableDuplicateComponentScan = true;
+        private bool _enableInvalidLayerScan = true;
         
         private Vector2 _pagesScroll = Vector2.zero;
         private Vector2 _fieldTypesScroll = Vector2.zero;
@@ -140,6 +162,12 @@ namespace MissingReferencesHunter
             Show();
 
             var assetPaths = AssetDatabase.GetAllAssetPaths().ToList();
+
+            HashSet<int> validLayers = null;
+            if (_enableInvalidLayerScan)
+            {
+                validLayers = LoadValidLayers();
+            }
 
             EditorUtility.ClearProgressBar();
             
@@ -334,49 +362,6 @@ namespace MissingReferencesHunter
                                 }
                             }
                         }
-                        else if (line.Contains("m_AssetGUID:"))
-                        {
-                            if (line.Length < 32)
-                                continue;
-                            
-                            var externalGuid = line.Substring(line.Length - 32);
-                            var guidValid = !externalGuid.StartsWith("0000000000");
-
-                            if (!guidValid)
-                            {
-                                Debug.LogWarning($"Guid is invalid at {line}");
-                                continue;
-                            }
-
-                            var referenceData = new ExternalReferenceRegistry(true, guidValid, 0,
-                                externalGuid, index);
-                            refsData.ExternalReferences.Add(referenceData);
-
-                            var extendedPlaceDataRecorded = false;
-
-                            if (guidValid)
-                            {
-                                var existsInAssets = _result.Guids.Contains(externalGuid) ||
-                                                     !string.IsNullOrEmpty(
-                                                         AssetDatabase.GUIDToAssetPath(externalGuid));
-
-                                referenceData.GuidExistsInAssets = existsInAssets;
-                                referenceData.FileIDExistsInAssets = existsInAssets;
-
-                                if (!existsInAssets)
-                                {
-                                    RecordGuidPlaceData(index, lines, referenceData);
-                                    extendedPlaceDataRecorded = true;
-                                }
-                            }
-
-                            if (!extendedPlaceDataRecorded)
-                            {
-                                referenceData.Sample.Add(lines[index]);
-                            }
-
-                            FindFieldType(regexTypeStart, index, lines, referenceData);
-                        }
                     }
                 }
 
@@ -390,6 +375,26 @@ namespace MissingReferencesHunter
                             localId.LocalUsagesCount++;
                         }
                     }
+                }
+
+                if (_enableMissingMethodScan || _enableTypeMismatchScan)
+                {
+                    ScanUnityEventReferences(lines, refsData, _enableMissingMethodScan, _enableTypeMismatchScan);
+                }
+
+                if (_enableMissingScriptScan)
+                {
+                    ScanMissingScripts(lines, refsData);
+                }
+
+                if (_enableInvalidLayerScan && validLayers != null)
+                {
+                    ScanInvalidLayers(lines, refsData, validLayers);
+                }
+
+                if (_enableDuplicateComponentScan && type == typeof(GameObject))
+                {
+                    ScanDuplicateComponents(assetPath, refsData);
                 }
 
                 _result.Assets.Add(new AssetData(assetPath, type, typeName, guidStr, refsData));
@@ -438,11 +443,26 @@ namespace MissingReferencesHunter
             _result.MissingFileIDCases = _result.Assets.Count(x => x.RefsData.MissingFileID > 0);
             _result.MissingLocalFileIDCases = _result.Assets.Count(x => x.RefsData.MissingLocalFileID > 0);
             _result.EmptyFileIDCases = _result.Assets.Count(x => x.RefsData.EmptyFileIDs.Count > 0);
+            _result.MissingMethodCases = _result.Assets.Count(x => x.RefsData.MissingMethods.Count > 0);
+            _result.TypeMismatchCases = _result.Assets.Count(x => x.RefsData.TypeMismatches.Count > 0);
+            _result.MissingScriptCases = _result.Assets.Count(x => x.RefsData.MissingScripts.Count > 0);
+            _result.DuplicateComponentCases = _result.Assets.Count(x => x.RefsData.DuplicateComponents.Count > 0);
+            _result.InvalidLayerCases = _result.Assets.Count(x => x.RefsData.InvalidLayers.Count > 0);
             
             var casesWithNoWarnings = _result.Assets.Count(x => !x.RefsData.HasWarnings);
             var assetsWithWarnings = _result.Assets.Count - casesWithNoWarnings;
             
-            _result.OutputDescription = $"Assets with GUID related Issues: {assetsWithWarnings}";
+            _result.OutputDescription = $"Assets with issues: {assetsWithWarnings}";
+            if (_enableMissingMethodScan)
+                _result.OutputDescription += $" | Missing Methods: {_result.MissingMethodCases}";
+            if (_enableTypeMismatchScan)
+                _result.OutputDescription += $" | Type Mismatches: {_result.TypeMismatchCases}";
+            if (_enableMissingScriptScan)
+                _result.OutputDescription += $" | Missing Scripts: {_result.MissingScriptCases}";
+            if (_enableDuplicateComponentScan)
+                _result.OutputDescription += $" | Dup Components: {_result.DuplicateComponentCases}";
+            if (_enableInvalidLayerScan)
+                _result.OutputDescription += $" | Invalid Layers: {_result.InvalidLayerCases}";
 
             EditorUtility.ClearProgressBar();
             
@@ -569,6 +589,242 @@ namespace MissingReferencesHunter
 
             referenceData.HolderName = holderName;
         }
+
+        private static readonly Regex TargetAssemblyTypeRegex = new Regex(@"m_TargetAssemblyTypeName:\s*([\w.]+)");
+        private static readonly Regex MethodNameRegex = new Regex(@"m_MethodName:\s*(\w+)");
+        private static readonly Regex ArgAssemblyTypeRegex = new Regex(@"m_ObjectArgumentAssemblyTypeName:\s*([\w.]+)");
+
+        private static void ScanUnityEventReferences(string[] lines, AssetReferencesData refsData,
+            bool checkMissingMethods, bool checkTypeMismatches)
+        {
+            var targetTypes = new List<(string typeName, int line)>();
+            var methodNames = new List<(string methodName, int line)>();
+            var argTypes = new List<(string typeName, int line)>();
+
+            for (var i = 0; i < lines.Length; i++)
+            {
+                var line = lines[i];
+
+                if (checkMissingMethods)
+                {
+                    var targetMatch = TargetAssemblyTypeRegex.Match(line);
+                    if (targetMatch.Success)
+                    {
+                        targetTypes.Add((targetMatch.Groups[1].Value, i));
+                    }
+
+                    var methodMatch = MethodNameRegex.Match(line);
+                    if (methodMatch.Success)
+                    {
+                        methodNames.Add((methodMatch.Groups[1].Value, i));
+                    }
+                }
+
+                if (checkTypeMismatches)
+                {
+                    var argMatch = ArgAssemblyTypeRegex.Match(line);
+                    if (argMatch.Success)
+                    {
+                        argTypes.Add((argMatch.Groups[1].Value, i));
+                    }
+                }
+            }
+
+            if (checkMissingMethods)
+            {
+                var pairCount = Math.Min(targetTypes.Count, methodNames.Count);
+                for (var i = 0; i < pairCount; i++)
+                {
+                    var (className, _) = targetTypes[i];
+                    var (methodName, methodLine) = methodNames[i];
+
+                    if (string.IsNullOrEmpty(className))
+                        continue;
+
+                    var targetType = ResolveType(className);
+                    if (targetType == null)
+                        continue;
+
+                    var methods = targetType.GetMethods(
+                        BindingFlags.Public | BindingFlags.NonPublic |
+                        BindingFlags.Instance | BindingFlags.Static);
+                    var methodExists = methods.Any(m => m.Name == methodName);
+
+                    if (!methodExists)
+                    {
+                        refsData.MissingMethods.Add(new MissingMethodEntry(className, methodName, methodLine));
+                    }
+                }
+            }
+
+            if (checkTypeMismatches)
+            {
+                foreach (var (typeName, line) in argTypes)
+                {
+                    if (string.IsNullOrEmpty(typeName))
+                        continue;
+
+                    var resolvedType = ResolveType(typeName);
+                    if (resolvedType == null)
+                    {
+                        refsData.TypeMismatches.Add(new TypeMismatchEntry(typeName, line));
+                    }
+                }
+            }
+        }
+
+        private static Type ResolveType(string typeName)
+        {
+            var cleanName = typeName.Split(',')[0].Trim();
+
+            var type = Type.GetType(cleanName);
+            if (type != null) return type;
+
+            type = Type.GetType($"{cleanName}, Assembly-CSharp, Version=0.0.0.0, Culture=neutral, PublicKeyToken=null");
+            if (type != null) return type;
+
+            foreach (var assembly in AppDomain.CurrentDomain.GetAssemblies())
+            {
+                try
+                {
+                    type = assembly.GetType(cleanName);
+                    if (type != null) return type;
+                }
+                catch
+                {
+                    // skip assemblies that throw on GetType
+                }
+            }
+
+            return null;
+        }
+
+        private static readonly Regex ScriptGuidRegex = new Regex(@"m_Script:\s*\{fileID:\s*\d+,\s*guid:\s*([a-f0-9]{32})");
+        private static readonly Regex LayerRegex = new Regex(@"^\s*m_Layer:\s*(\d+)\s*$");
+
+        private static void ScanMissingScripts(string[] lines, AssetReferencesData refsData)
+        {
+            for (var i = 0; i < lines.Length; i++)
+            {
+                var match = ScriptGuidRegex.Match(lines[i]);
+                if (match.Success)
+                {
+                    var guid = match.Groups[1].Value;
+                    if (guid.StartsWith("0000000000"))
+                        continue;
+
+                    var scriptPath = AssetDatabase.GUIDToAssetPath(guid);
+                    if (string.IsNullOrEmpty(scriptPath))
+                    {
+                        refsData.MissingScripts.Add(new MissingScriptEntry(guid, i));
+                    }
+                }
+            }
+        }
+
+        private static void ScanInvalidLayers(string[] lines, AssetReferencesData refsData, HashSet<int> validLayers)
+        {
+            for (var i = 0; i < lines.Length; i++)
+            {
+                var match = LayerRegex.Match(lines[i]);
+                if (match.Success)
+                {
+                    var layerIndex = int.Parse(match.Groups[1].Value);
+                    if (!validLayers.Contains(layerIndex))
+                    {
+                        refsData.InvalidLayers.Add(new InvalidLayerEntry(layerIndex, i));
+                    }
+                }
+            }
+        }
+
+        private static HashSet<int> LoadValidLayers()
+        {
+            var validLayers = new HashSet<int>();
+            var tagManagerPath = "ProjectSettings/TagManager.asset";
+
+            if (!File.Exists(tagManagerPath))
+                return validLayers;
+
+            string[] lines;
+            try
+            {
+                lines = File.ReadAllLines(tagManagerPath);
+            }
+            catch
+            {
+                return validLayers;
+            }
+
+            var inLayers = false;
+            var layerIndex = 0;
+
+            foreach (var line in lines)
+            {
+                var trimmed = line.TrimStart();
+
+                if (!inLayers)
+                {
+                    if (trimmed.StartsWith("layers:"))
+                    {
+                        inLayers = true;
+                    }
+                    continue;
+                }
+
+                if (layerIndex >= 32)
+                    break;
+
+                if (trimmed.StartsWith("- "))
+                {
+                    var name = trimmed.Substring(2).Trim();
+                    if (!string.IsNullOrEmpty(name))
+                    {
+                        validLayers.Add(layerIndex);
+                    }
+                    layerIndex++;
+                }
+                else if (!line.StartsWith(" ") && !line.StartsWith("\t"))
+                {
+                    break;
+                }
+            }
+
+            return validLayers;
+        }
+
+        private static void ScanDuplicateComponents(string assetPath, AssetReferencesData refsData)
+        {
+            var go = AssetDatabase.LoadAssetAtPath<GameObject>(assetPath);
+            if (go == null) return;
+
+            var allTransforms = go.GetComponentsInChildren<Transform>(true);
+
+            foreach (var t in allTransforms)
+            {
+                var childGo = t.gameObject;
+                var components = childGo.GetComponents<Component>();
+                var typeCounts = new Dictionary<Type, int>();
+
+                foreach (var comp in components)
+                {
+                    if (comp == null) continue;
+                    var type = comp.GetType();
+                    if (!typeCounts.ContainsKey(type))
+                        typeCounts[type] = 0;
+                    typeCounts[type]++;
+                }
+
+                foreach (var kvp in typeCounts)
+                {
+                    if (kvp.Value > 1)
+                    {
+                        refsData.DuplicateComponents.Add(new DuplicateComponentEntry(
+                            kvp.Key.Name, kvp.Value, childGo.name));
+                    }
+                }
+            }
+        }
         
         private void OnGUI()
         {
@@ -639,6 +895,36 @@ namespace MissingReferencesHunter
                 if (_outputSettings.ShowEmptyLocalRefs && asset.RefsData.EmptyFileIDs.Count > 0)
                 {
                     filteredAssets.Add(asset);
+                    continue;
+                }
+
+                if (_outputSettings.ShowMissingMethods && asset.RefsData.MissingMethods.Count > 0)
+                {
+                    filteredAssets.Add(asset);
+                    continue;
+                }
+
+                if (_outputSettings.ShowTypeMismatches && asset.RefsData.TypeMismatches.Count > 0)
+                {
+                    filteredAssets.Add(asset);
+                    continue;
+                }
+
+                if (_outputSettings.ShowMissingScripts && asset.RefsData.MissingScripts.Count > 0)
+                {
+                    filteredAssets.Add(asset);
+                    continue;
+                }
+
+                if (_outputSettings.ShowDuplicateComponents && asset.RefsData.DuplicateComponents.Count > 0)
+                {
+                    filteredAssets.Add(asset);
+                    continue;
+                }
+
+                if (_outputSettings.ShowInvalidLayers && asset.RefsData.InvalidLayers.Count > 0)
+                {
+                    filteredAssets.Add(asset);
                 }
             }
 
@@ -651,18 +937,26 @@ namespace MissingReferencesHunter
 
             EditorGUILayout.BeginHorizontal();
             
-            var prevColor = GUI.color;
-            GUI.color = !_outputSettings.PageToShow.HasValue ? Color.yellow : Color.white;
-
-            if (GUILayout.Button("All", GUILayout.Width(30f)))
-            {
-                _outputSettings.PageToShow = null;
-            }
-
-            GUI.color = prevColor;
-            
             var totalCount = filteredAssets.Count;
             var pagesCount = totalCount / OutputSettings.PageSize + (totalCount % OutputSettings.PageSize > 0 ? 1 : 0);
+            var showAllButton = totalCount <= 150;
+            if (!showAllButton && !_outputSettings.PageToShow.HasValue && pagesCount > 0)
+            {
+                _outputSettings.PageToShow = 0;
+            }
+
+            var prevColor = GUI.color;
+            if (showAllButton)
+            {
+                GUI.color = !_outputSettings.PageToShow.HasValue ? Color.yellow : Color.white;
+
+                if (GUILayout.Button("All", GUILayout.Width(30f)))
+                {
+                    _outputSettings.PageToShow = null;
+                }
+
+                GUI.color = prevColor;
+            }
 
             for (var i = 0; i < pagesCount; i++)
             {
@@ -775,6 +1069,70 @@ namespace MissingReferencesHunter
             }
             
             EditorGUILayout.EndHorizontal();
+
+            if (_enableMissingMethodScan || _enableTypeMismatchScan)
+            {
+                EditorGUILayout.BeginHorizontal();
+
+                if (_enableMissingMethodScan)
+                {
+                    var assetsWithMissingMethods = $"<Missing> Methods [{_result.MissingMethodCases}]: ";
+                    GUI.color = _outputSettings.ShowMissingMethods ? Color.magenta : Color.gray;
+                    if (GUILayout.Button(assetsWithMissingMethods + (_outputSettings.ShowMissingMethods ? "Shown" : "Hidden")))
+                    {
+                        _outputSettings.ShowMissingMethods = !_outputSettings.ShowMissingMethods;
+                    }
+                }
+
+                if (_enableTypeMismatchScan)
+                {
+                    var assetsWithTypeMismatches = $"Type Mismatch [{_result.TypeMismatchCases}]: ";
+                    GUI.color = _outputSettings.ShowTypeMismatches ? new Color(1f, 0.5f, 0f) : Color.gray;
+                    if (GUILayout.Button(assetsWithTypeMismatches + (_outputSettings.ShowTypeMismatches ? "Shown" : "Hidden")))
+                    {
+                        _outputSettings.ShowTypeMismatches = !_outputSettings.ShowTypeMismatches;
+                    }
+                }
+
+                EditorGUILayout.EndHorizontal();
+            }
+
+            if (_enableMissingScriptScan || _enableDuplicateComponentScan || _enableInvalidLayerScan)
+            {
+                EditorGUILayout.BeginHorizontal();
+
+                if (_enableMissingScriptScan)
+                {
+                    var assetsWithMissingScripts = $"Missing Scripts [{_result.MissingScriptCases}]: ";
+                    GUI.color = _outputSettings.ShowMissingScripts ? Color.red : Color.gray;
+                    if (GUILayout.Button(assetsWithMissingScripts + (_outputSettings.ShowMissingScripts ? "Shown" : "Hidden")))
+                    {
+                        _outputSettings.ShowMissingScripts = !_outputSettings.ShowMissingScripts;
+                    }
+                }
+
+                if (_enableDuplicateComponentScan)
+                {
+                    var assetsWithDupComponents = $"Dup Components [{_result.DuplicateComponentCases}]: ";
+                    GUI.color = _outputSettings.ShowDuplicateComponents ? Color.cyan : Color.gray;
+                    if (GUILayout.Button(assetsWithDupComponents + (_outputSettings.ShowDuplicateComponents ? "Shown" : "Hidden")))
+                    {
+                        _outputSettings.ShowDuplicateComponents = !_outputSettings.ShowDuplicateComponents;
+                    }
+                }
+
+                if (_enableInvalidLayerScan)
+                {
+                    var assetsWithInvalidLayers = $"Invalid Layers [{_result.InvalidLayerCases}]: ";
+                    GUI.color = _outputSettings.ShowInvalidLayers ? Color.yellow : Color.gray;
+                    if (GUILayout.Button(assetsWithInvalidLayers + (_outputSettings.ShowInvalidLayers ? "Shown" : "Hidden")))
+                    {
+                        _outputSettings.ShowInvalidLayers = !_outputSettings.ShowInvalidLayers;
+                    }
+                }
+
+                EditorGUILayout.EndHorizontal();
+            }
             
             EditorGUILayout.BeginHorizontal();
             
@@ -877,6 +1235,36 @@ namespace MissingReferencesHunter
                 GUI.color = asset.RefsData.MissingGuid > 0 ? Color.yellow : Color.white;
                 EditorGUILayout.LabelField("Missing Guid: " + asset.RefsData.MissingGuid, GUILayout.Width(120f));
 
+                if (_enableMissingMethodScan)
+                {
+                    GUI.color = asset.RefsData.MissingMethods.Count > 0 ? Color.magenta : Color.gray;
+                    EditorGUILayout.LabelField("Missing Methods: " + asset.RefsData.MissingMethods.Count, GUILayout.Width(130f));
+                }
+
+                if (_enableTypeMismatchScan)
+                {
+                    GUI.color = asset.RefsData.TypeMismatches.Count > 0 ? new Color(1f, 0.5f, 0f) : Color.gray;
+                    EditorGUILayout.LabelField("Type Mismatch: " + asset.RefsData.TypeMismatches.Count, GUILayout.Width(130f));
+                }
+
+                if (_enableMissingScriptScan)
+                {
+                    GUI.color = asset.RefsData.MissingScripts.Count > 0 ? Color.red : Color.gray;
+                    EditorGUILayout.LabelField("Miss Scripts: " + asset.RefsData.MissingScripts.Count, GUILayout.Width(110f));
+                }
+
+                if (_enableDuplicateComponentScan && asset.Type == typeof(GameObject))
+                {
+                    GUI.color = asset.RefsData.DuplicateComponents.Count > 0 ? Color.cyan : Color.gray;
+                    EditorGUILayout.LabelField("Dup Comp: " + asset.RefsData.DuplicateComponents.Count, GUILayout.Width(100f));
+                }
+
+                if (_enableInvalidLayerScan)
+                {
+                    GUI.color = asset.RefsData.InvalidLayers.Count > 0 ? Color.yellow : Color.gray;
+                    EditorGUILayout.LabelField("Inv Layers: " + asset.RefsData.InvalidLayers.Count, GUILayout.Width(110f));
+                }
+
                 if (_outputSettings.ShowFileIDIssues)
                 {
                     GUI.color = asset.RefsData.MissingFileID > 0 ? Color.cyan : Color.white;
@@ -910,7 +1298,7 @@ namespace MissingReferencesHunter
                             if (!_outputSettings.ShowMissingFileID && !guidIssue)
                                 continue;
 
-                            if (fileIdIssue && registry.FileID != 0)
+                            if (fileIdIssue)
                             {
                                 if (_outputSettings.ShowFileIDIssues || guidIssue)
                                 {
@@ -989,6 +1377,119 @@ namespace MissingReferencesHunter
                             GUIUtilities.HorizontalLine();
                         }
                     }
+
+                    if (_enableMissingMethodScan && _outputSettings.ShowMissingMethods && asset.RefsData.MissingMethods.Count > 0)
+                    {
+                        prevColor = GUI.color;
+                        GUI.color = Color.magenta;
+                        EditorGUILayout.LabelField("<Missing> Method References:");
+                        GUI.color = prevColor;
+
+                        foreach (var entry in asset.RefsData.MissingMethods)
+                        {
+                            EditorGUILayout.BeginHorizontal();
+                            prevColor = GUI.color;
+                            GUI.color = Color.magenta;
+                            EditorGUILayout.LabelField($"  {entry.ClassName}.{entry.MethodName}", GUILayout.Width(400f));
+                            GUI.color = prevColor;
+                            EditorGUILayout.LabelField($"at line [{entry.Line + 1}]");
+                            GUILayout.FlexibleSpace();
+                            EditorGUILayout.EndHorizontal();
+                        }
+
+                        GUIUtilities.HorizontalLine();
+                    }
+
+                    if (_enableTypeMismatchScan && _outputSettings.ShowTypeMismatches && asset.RefsData.TypeMismatches.Count > 0)
+                    {
+                        prevColor = GUI.color;
+                        GUI.color = new Color(1f, 0.5f, 0f);
+                        EditorGUILayout.LabelField("Type Mismatch References:");
+                        GUI.color = prevColor;
+
+                        foreach (var entry in asset.RefsData.TypeMismatches)
+                        {
+                            EditorGUILayout.BeginHorizontal();
+                            prevColor = GUI.color;
+                            GUI.color = new Color(1f, 0.5f, 0f);
+                            EditorGUILayout.LabelField($"  {entry.TypeName}", GUILayout.Width(400f));
+                            GUI.color = prevColor;
+                            EditorGUILayout.LabelField($"at line [{entry.Line + 1}]");
+                            GUILayout.FlexibleSpace();
+                            EditorGUILayout.EndHorizontal();
+                        }
+
+                        GUIUtilities.HorizontalLine();
+                    }
+
+                    if (_enableMissingScriptScan && _outputSettings.ShowMissingScripts && asset.RefsData.MissingScripts.Count > 0)
+                    {
+                        prevColor = GUI.color;
+                        GUI.color = Color.red;
+                        EditorGUILayout.LabelField("Missing Script References:");
+                        GUI.color = prevColor;
+
+                        foreach (var entry in asset.RefsData.MissingScripts)
+                        {
+                            EditorGUILayout.BeginHorizontal();
+                            prevColor = GUI.color;
+                            GUI.color = Color.red;
+                            EditorGUILayout.LabelField($"  GUID: {entry.ScriptGuid}", GUILayout.Width(400f));
+                            GUI.color = prevColor;
+                            EditorGUILayout.LabelField($"at line [{entry.Line + 1}]");
+                            if (GUILayout.Button("Copy", GUILayout.Width(50f)))
+                            {
+                                GUIUtility.systemCopyBuffer = entry.ScriptGuid;
+                            }
+                            GUILayout.FlexibleSpace();
+                            EditorGUILayout.EndHorizontal();
+                        }
+
+                        GUIUtilities.HorizontalLine();
+                    }
+
+                    if (_enableDuplicateComponentScan && _outputSettings.ShowDuplicateComponents && asset.RefsData.DuplicateComponents.Count > 0)
+                    {
+                        prevColor = GUI.color;
+                        GUI.color = Color.cyan;
+                        EditorGUILayout.LabelField("Duplicate Components:");
+                        GUI.color = prevColor;
+
+                        foreach (var entry in asset.RefsData.DuplicateComponents)
+                        {
+                            EditorGUILayout.BeginHorizontal();
+                            prevColor = GUI.color;
+                            GUI.color = Color.cyan;
+                            EditorGUILayout.LabelField($"  [{entry.GameObjectName}] {entry.ComponentType} x{entry.Count}", GUILayout.Width(400f));
+                            GUI.color = prevColor;
+                            GUILayout.FlexibleSpace();
+                            EditorGUILayout.EndHorizontal();
+                        }
+
+                        GUIUtilities.HorizontalLine();
+                    }
+
+                    if (_enableInvalidLayerScan && _outputSettings.ShowInvalidLayers && asset.RefsData.InvalidLayers.Count > 0)
+                    {
+                        prevColor = GUI.color;
+                        GUI.color = Color.yellow;
+                        EditorGUILayout.LabelField("Invalid Layer References:");
+                        GUI.color = prevColor;
+
+                        foreach (var entry in asset.RefsData.InvalidLayers)
+                        {
+                            EditorGUILayout.BeginHorizontal();
+                            prevColor = GUI.color;
+                            GUI.color = Color.yellow;
+                            EditorGUILayout.LabelField($"  Layer {entry.LayerIndex} (undefined)", GUILayout.Width(400f));
+                            GUI.color = prevColor;
+                            EditorGUILayout.LabelField($"at line [{entry.Line + 1}]");
+                            GUILayout.FlexibleSpace();
+                            EditorGUILayout.EndHorizontal();
+                        }
+
+                        GUIUtilities.HorizontalLine();
+                    }
                 }
                 
                 GUIUtilities.HorizontalLine();
@@ -1026,6 +1527,52 @@ namespace MissingReferencesHunter
             GUILayout.FlexibleSpace();
             
             EditorGUILayout.EndHorizontal();
+
+            _settingsFoldout = EditorGUILayout.Foldout(_settingsFoldout, "Analysis Settings");
+
+            if (_settingsFoldout)
+            {
+                EditorGUI.indentLevel++;
+                
+                EditorGUILayout.LabelField(new GUIContent("Additionaly Scan For:", "Missing References are scanned by default. However you can enable/disable additional analysis options below."));
+
+                _enableMissingMethodScan = EditorGUILayout.Toggle(
+                    new GUIContent("<Missing> Methods",
+                        "Check UnityEvent references for methods that no longer exist on the target type.\n" +
+                        "Detects '<Missing>' callbacks in buttons, events, etc.\n" +
+                        "Scans m_TargetAssemblyTypeName + m_MethodName pairs via reflection."),
+                    _enableMissingMethodScan);
+
+                _enableTypeMismatchScan = EditorGUILayout.Toggle(
+                    new GUIContent("Type Mismatches",
+                        "Check UnityEvent argument types that cannot be resolved in any loaded assembly.\n" +
+                        "Detects 'Type Mismatch' issues where m_ObjectArgumentAssemblyTypeName\n" +
+                        "references a class that has been deleted or renamed."),
+                    _enableTypeMismatchScan);
+
+                _enableMissingScriptScan = EditorGUILayout.Toggle(
+                    new GUIContent("Missing Scripts",
+                        "Check MonoBehaviour components referencing deleted/missing scripts.\n" +
+                        "Scans m_Script GUID references in YAML and verifies the script asset exists.\n" +
+                        "Works for both prefabs and scenes."),
+                    _enableMissingScriptScan);
+
+                _enableDuplicateComponentScan = EditorGUILayout.Toggle(
+                    new GUIContent("Duplicate Components",
+                        "Check for duplicate component types on GameObjects in prefabs.\n" +
+                        "Uses runtime API to inspect component hierarchies.\n" +
+                        "Reports any component type appearing more than once on the same GameObject."),
+                    _enableDuplicateComponentScan);
+
+                _enableInvalidLayerScan = EditorGUILayout.Toggle(
+                    new GUIContent("Invalid Layers",
+                        "Check for GameObject layer values not defined in TagManager.\n" +
+                        "Loads valid layers from ProjectSettings/TagManager.asset and scans\n" +
+                        "m_Layer values in prefabs and scenes for undefined layer indices."),
+                    _enableInvalidLayerScan);
+
+                EditorGUI.indentLevel--;
+            }
         }
         
         private void DrawInfoSection()
@@ -1100,7 +1647,60 @@ namespace MissingReferencesHunter
             EditorGUILayout.LabelField("[Missing Local FileID] - might indicate that there is some issue with internal objects referencing each other");
             EditorGUILayout.LabelField("[Empty Local FileID] - might indicate an empty internal field");
             EditorGUILayout.LabelField("* these two fields provide some very specific info that is rarely needed for most of users");
-                
+
+            if (_enableMissingMethodScan)
+            {
+                GUIUtilities.HorizontalLine();
+
+                GUI.color = Color.magenta;
+                EditorGUILayout.LabelField("[<Missing> Methods] - UnityEvent references a method that no longer exists on the target type");
+                EditorGUILayout.LabelField("* appears when a script method referenced by a UnityEvent (button click, etc.) has been renamed or deleted");
+                EditorGUILayout.LabelField("* shows as \"<Missing>\" in the Unity Inspector dropdown");
+            }
+
+            if (_enableTypeMismatchScan)
+            {
+                if (!_enableMissingMethodScan)
+                    GUIUtilities.HorizontalLine();
+
+                GUI.color = new Color(1f, 0.5f, 0f);
+                EditorGUILayout.LabelField("[Type Mismatch] - UnityEvent argument references a type that cannot be resolved");
+                EditorGUILayout.LabelField("* appears when the object argument type in a UnityEvent has been deleted or renamed");
+                EditorGUILayout.LabelField("* the type name is stored in m_ObjectArgumentAssemblyTypeName but the class no longer exists");
+            }
+
+            if (_enableMissingScriptScan)
+            {
+                GUIUtilities.HorizontalLine();
+
+                GUI.color = Color.red;
+                EditorGUILayout.LabelField("[Missing Scripts] - MonoBehaviour components referencing deleted or missing scripts");
+                EditorGUILayout.LabelField("* appears when a script file referenced by a component has been deleted or moved");
+                EditorGUILayout.LabelField("* shows as \"Missing (Mono Script)\" in the Unity Inspector");
+            }
+
+            if (_enableDuplicateComponentScan)
+            {
+                GUIUtilities.HorizontalLine();
+
+                GUI.color = Color.cyan;
+                EditorGUILayout.LabelField("[Duplicate Components] - Multiple components of the same type on a single GameObject");
+                EditorGUILayout.LabelField("* reports any component type appearing more than once on the same GameObject in prefabs");
+                EditorGUILayout.LabelField("* some duplicates may be intentional (e.g. multiple colliders); review before fixing");
+            }
+
+            if (_enableInvalidLayerScan)
+            {
+                GUIUtilities.HorizontalLine();
+
+                GUI.color = Color.yellow;
+                EditorGUILayout.LabelField("[Invalid Layers] - GameObject layer values not defined in TagManager");
+                EditorGUILayout.LabelField("* appears when a GameObject's m_Layer references an index with no name in TagManager");
+                EditorGUILayout.LabelField("* valid layers are loaded from ProjectSettings/TagManager.asset");
+            }
+
+            GUI.color = Color.white;
+
             EditorGUILayout.EndVertical();
                 
             GUI.color = prevColor;
@@ -1135,6 +1735,70 @@ namespace MissingReferencesHunter
             Line = line;
         }
         
+        public int Line { get; }
+    }
+
+    public class MissingMethodEntry
+    {
+        public MissingMethodEntry(string className, string methodName, int line)
+        {
+            ClassName = className;
+            MethodName = methodName;
+            Line = line;
+        }
+
+        public string ClassName { get; }
+        public string MethodName { get; }
+        public int Line { get; }
+    }
+
+    public class TypeMismatchEntry
+    {
+        public TypeMismatchEntry(string typeName, int line)
+        {
+            TypeName = typeName;
+            Line = line;
+        }
+
+        public string TypeName { get; }
+        public int Line { get; }
+    }
+
+    public class MissingScriptEntry
+    {
+        public MissingScriptEntry(string scriptGuid, int line)
+        {
+            ScriptGuid = scriptGuid;
+            Line = line;
+        }
+
+        public string ScriptGuid { get; }
+        public int Line { get; }
+    }
+
+    public class DuplicateComponentEntry
+    {
+        public DuplicateComponentEntry(string componentType, int count, string gameObjectName)
+        {
+            ComponentType = componentType;
+            Count = count;
+            GameObjectName = gameObjectName;
+        }
+
+        public string ComponentType { get; }
+        public int Count { get; }
+        public string GameObjectName { get; }
+    }
+
+    public class InvalidLayerEntry
+    {
+        public InvalidLayerEntry(int layerIndex, int line)
+        {
+            LayerIndex = layerIndex;
+            Line = line;
+        }
+
+        public int LayerIndex { get; }
         public int Line { get; }
     }
 
@@ -1185,13 +1849,20 @@ namespace MissingReferencesHunter
         public List<ExternalReferenceRegistry> ExternalReferences { get; } = new List<ExternalReferenceRegistry>();
         public List<LocalReferenceRegistry> LocalReferences { get; } = new List<LocalReferenceRegistry>();
         public List<EmptyLocalFileIDRegistry> EmptyFileIDs { get; } = new List<EmptyLocalFileIDRegistry>();
+        public List<MissingMethodEntry> MissingMethods { get; } = new List<MissingMethodEntry>();
+        public List<TypeMismatchEntry> TypeMismatches { get; } = new List<TypeMismatchEntry>();
+        public List<MissingScriptEntry> MissingScripts { get; } = new List<MissingScriptEntry>();
+        public List<DuplicateComponentEntry> DuplicateComponents { get; } = new List<DuplicateComponentEntry>();
+        public List<InvalidLayerEntry> InvalidLayers { get; } = new List<InvalidLayerEntry>();
        
         public int MissingFileIDAndGuid { get; private set; }
         public int MissingGuid { get; private set; }
         public int MissingFileID { get; private set; }
         public int MissingLocalFileID { get; private set; }
 
-        public bool HasWarnings => MissingFileIDAndGuid > 0 || MissingGuid > 0;
+        public bool HasWarnings => MissingFileIDAndGuid > 0 || MissingGuid > 0
+            || MissingMethods.Count > 0 || TypeMismatches.Count > 0
+            || MissingScripts.Count > 0 || DuplicateComponents.Count > 0 || InvalidLayers.Count > 0;
 
         public void CalculateCounters()
         {

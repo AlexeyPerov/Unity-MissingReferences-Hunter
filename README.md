@@ -30,6 +30,19 @@ Press "Run Analysis" button to run the analysis (can take several minutes depend
 
 ![plot](./Screenshots~/main_window.png)
 
+## Scan scope
+
+The tool scans serialized data for GameObjects/prefabs, ScriptableObjects, and scenes.
+It reads serialized file contents to inspect GUIDs, FileIDs, UnityEvent data, script references, and layer values.
+
+Some checks are optional and can be enabled or disabled before running analysis:
+
+- `<Missing> Methods` checks UnityEvent callbacks whose target method no longer exists.
+- `Type Mismatch` checks UnityEvent object-argument types that cannot be resolved from loaded assemblies.
+- `Missing Scripts` checks MonoBehaviour script GUIDs that no longer resolve to a script asset.
+- `Duplicate Components` checks prefab GameObjects with more than one component of the same type.
+- `Invalid Layers` checks serialized `m_Layer` values against `ProjectSettings/TagManager.asset`.
+
 ## Working with results
 
 * [Missing FileID and Guid] - in 100% of cases indicates an error like on the screenshot below
@@ -39,6 +52,12 @@ Press "Run Analysis" button to run the analysis (can take several minutes depend
 so we are not 100% that there is a problem. However the tool still marks it as a warning for you to investigate
 
 * Other FileID issues most likely do not indicate errors and are hidden by default
+
+Suggested triage order:
+
+- Red issues first: `[Missing FileID and Guid]` and missing scripts usually indicate broken serialized references.
+- Yellow issues next: `[Missing Guid]`, type mismatch, and invalid layers usually need investigation.
+- Cyan/FileID-only issues last: these are more often Unity-internal or edge-case serialization details.
 
 ## How it works
 
@@ -77,6 +96,13 @@ That is why other filters are hidden by default and most of the users won't need
 
 * so in some cases you need to enable Debug inspector view or even dive into the asset file text contents
 
+When a result is not visible in the normal Inspector, try:
+
+- Switch the Inspector to Debug mode and inspect serialized fields directly.
+- Open the asset/scene YAML text and use the reported line number or field type to locate the reference.
+- For UnityEvent issues, check event target objects and method dropdowns on affected components.
+- For missing scripts, look for `Missing (Mono Script)` components on the reported prefab or scene object.
+
 
 This tool also collects some other info:
 
@@ -84,6 +110,11 @@ This tool also collects some other info:
 * [Empty Local FileID] - might indicate an empty internal field 
 
 these two fields provide some very specific info that is rarely needed for most of users
+
+* [Missing Methods] - UnityEvent references a method that no longer exists on the target type (often after rename/delete); the Inspector may show `<Missing>` in the event dropdown when that scan is enabled
+* [Type Mismatch] - UnityEvent object-argument type cannot be resolved from loaded assemblies (e.g. deleted or renamed class referenced in serialization)
+* [Duplicate Components] - more than one component of the same type on the same GameObject in prefabs (flagged when that scan is enabled; some duplicates may be intentional)
+* [Invalid Layers] - GameObject `m_Layer` index does not correspond to a defined layer in TagManager / Project Settings
 
 ## Installation
 
