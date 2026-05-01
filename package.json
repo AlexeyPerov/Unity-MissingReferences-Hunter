@@ -2,10 +2,11 @@
   "name": "missing-references-hunter",
   "version": "1.1.0",
   "displayName": "Missing References Hunter",
-  "description": "Tool for detecting missing and null references in project assets.",
-  "unity": "2019.3",
+  "description": "Tool for detecting various reference issues in assets.",
+  "unity": "2022.3",
   "keywords": [
     "references",
+    "missing",
     "tool"
   ],
   "author": {
