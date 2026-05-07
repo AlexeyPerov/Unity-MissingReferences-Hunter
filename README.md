@@ -130,6 +130,11 @@ or to contribute to this project!
 
 ## Other tools
 
+
+##### Unity Scanner
+
+- To analyze the whole project for various issues [Unity-Scanner](https://github.com/AlexeyPerov/Unity-Scanner).
+
 ##### Dependencies Hunter
 
 - To find unreferenced assets in Unity project see [Dependencies-Hunter](https://github.com/AlexeyPerov/Unity-Dependencies-Hunter).
