@@ -1,6 +1,6 @@
 {
   "name": "missing-references-hunter",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "displayName": "Missing References Hunter",
   "description": "Tool for detecting various reference issues in assets.",
   "unity": "2022.3",

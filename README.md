@@ -116,6 +116,44 @@ these two fields provide some very specific info that is rarely needed for most 
 * [Duplicate Components] - more than one component of the same type on the same GameObject in prefabs (flagged when that scan is enabled; some duplicates may be intentional)
 * [Invalid Layers] - GameObject `m_Layer` index does not correspond to a defined layer in TagManager / Project Settings
 
+## Usage from code / CI
+
+`MissingReferencesHunterApi.FindMissingReferences` runs the same analysis without opening a window,
+so you can fail a build or a test when broken references appear.
+Settings are passed explicitly (`MissingReferencesHunterOptions`, defaults match the window).
+`HasIssues` covers the issues shown by default in the window: missing GUIDs, missing methods, type mismatches,
+missing scripts, duplicate components and invalid layers. FileID issues are reported only with `IncludeFileIDIssues`
+and never make `HasIssues` true.
+
+EditMode test:
+
+```csharp
+[Test]
+public void ProjectHasNoMissingReferences()
+{
+    var report = MissingReferencesHunterApi.FindMissingReferences();
+
+    foreach (var asset in report.AssetsWithIssues)
+    foreach (var issue in asset.Issues.Where(x => x.IsWarning))
+        Console.WriteLine($"::error file={asset.Path},line={issue.Line}::{issue.Kind}: {issue.Details}");
+
+    Assert.IsFalse(report.HasIssues, report.ToString());
+}
+```
+
+Command line (no test framework needed):
+
+```
+Unity -batchmode -projectPath <project> -logFile - \
+  -executeMethod MissingReferencesHunter.MissingReferencesHunterApi.RunFromCommandLine \
+  -reportPath Reports/missing-references-hunter.json
+```
+
+Exit code: `0` - no issues, `1` - issues found, `2` - analysis failed.
+Optional flags: `-skipMissingMethods`, `-skipTypeMismatches`, `-skipMissingScripts`, `-skipDuplicateComponents`,
+`-skipInvalidLayers`, `-includeFileIDIssues`.
+The JSON report lists every asset with issues, each issue with its kind, line and details.
+
 ## Installation
 
  1. Just copy and paste file [MissingReferencesHunter.cs](./Editor/MissingReferencesHunter.cs) inside Editor folder

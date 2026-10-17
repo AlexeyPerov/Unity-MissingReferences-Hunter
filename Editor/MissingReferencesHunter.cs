@@ -6,6 +6,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Reflection;
+using System.Text;
 using System.Text.RegularExpressions;
 using UnityEditor;
 using UnityEngine;
@@ -24,8 +25,6 @@ namespace MissingReferencesHunter
         private class Result
         {
             public List<AssetData> Assets { get; } = new List<AssetData>();
-            public HashSet<string> Guids { get; } = new HashSet<string>();
-            public HashSet<long> FileIDs { get; } = new HashSet<long>();
             public string OutputDescription { get; set; }
 
             public Dictionary<string, int> FieldTypeCounters { get; } = new Dictionary<string, int>();
@@ -88,50 +87,6 @@ namespace MissingReferencesHunter
         private Vector2 _fieldTypesScroll = Vector2.zero;
         private Vector2 _assetsScroll = Vector2.zero;
 
-        private readonly List<string> _keyWordsToIgnore = new List<string>
-        {
-            "objectReference: {fileID:",
-            "m_CorrespondingSourceObject: {fileID:",
-            "m_PrefabInstance: {fileID:",
-            "m_PrefabAsset: {fileID:",
-            "m_GameObject: {fileID:",
-            "m_Script: {fileID:",
-            "m_Icon: {fileID:",
-            "m_Father: {fileID:"
-        };
-
-        private readonly List<string> _keyWordsToIgnoreInSceneAsset = new List<string>
-        {
-            "m_OcclusionCullingData: {fileID:",
-            "m_HaloTexture: {fileID:",
-            "m_CustomReflection: {fileID:",
-            "m_Sun: {fileID:",
-            "m_LightmapParameters: {fileID:",
-            "m_LightingDataAsset: {fileID:",
-            "m_LightingSettings: {fileID:",
-            "m_NavMeshData: {fileID:",
-            "m_Icon: {fileID:",
-            "m_StaticBatchRoot: {fileID:",
-            "m_ProbeAnchor: {fileID:",
-            "m_LightProbeVolumeOverride: {fileID:",
-            "m_Cookie: {fileID:",
-            "m_Flare: {fileID:",
-            "m_TargetTexture: {fileID:",
-        };
-
-        private readonly List<string> _defaultIgnorePatterns = new List<string>
-        {
-            @"ProjectSettings/",
-            @"Packages/",
-            @"\.asmdef$",
-            @"link\.xml$",
-            @"\.csv$",
-            @"\.md$",
-            @"\.json$",
-            @"\.xml$",
-            @"\.txt$"
-        };
-        
         [MenuItem("Tools/Missing References Hunter")]
         public static void LaunchUnreferencedAssetsWindow()
         {
@@ -162,286 +117,30 @@ namespace MissingReferencesHunter
             Clear();
             Show();
 
-            var guidResolveCache = new Dictionary<string, bool>();
-            var fileIdCache = new Dictionary<string, HashSet<long>>();
-
-            var assetPaths = AssetDatabase.GetAllAssetPaths().ToList();
-
-            HashSet<int> validLayers = null;
-            if (_enableInvalidLayerScan)
+            var output = new MissingReferencesAnalysis.Output();
+            var analysis = MissingReferencesAnalysis.Run(new MissingReferencesAnalysis.Settings
             {
-                validLayers = LoadValidLayers();
+                ScanMissingMethods = _enableMissingMethodScan,
+                ScanTypeMismatches = _enableTypeMismatchScan,
+                ScanMissingScripts = _enableMissingScriptScan,
+                ScanDuplicateComponents = _enableDuplicateComponentScan,
+                ScanInvalidLayers = _enableInvalidLayerScan,
+                IgnoredPatterns = MissingReferencesAnalysis.DefaultIgnorePatterns
+            }, output);
+
+            while (analysis.MoveNext())
+            {
+                yield return analysis.Current;
             }
 
-            EditorUtility.ClearProgressBar();
-            
-            var regexFileAndGuid = new Regex(@"fileID: (\d+), guid: ([a-f0-9]{32})");
-            var regexFileID = new Regex(@"{fileID: \d+}");
-            var regexTypeStart = new Regex(@"^[a-zA-Z0-9_ ]+:");
-            
-            var count = 0;
-            for (var assetIndex = 0; assetIndex < assetPaths.Count; assetIndex++)
+            _result.Assets.AddRange(output.Assets);
+
+            foreach (var pair in output.FieldTypeCounters)
             {
-                if (assetIndex % 20000 == 0)
-                {
-                    GC.Collect();
-                    yield return 0.05f;
-                    GC.Collect();
-                }
-                
-                var assetPath = assetPaths[assetIndex];
-                EditorUtility.DisplayProgressBar("Missing References", "Searching for missing references",
-                    (float)count / assetPaths.Count);
-                count++;
-
-                var assetObject = AssetDatabase.LoadAssetAtPath<Object>(assetPath);
-
-                if (assetObject == null)
-                {
-                    Debug.LogWarning($"Unable to load an asset at path: {assetPath}");
-                    continue;
-                }
-
-                if (!AssetDatabase.TryGetGUIDAndLocalFileIdentifier(assetObject, out var guidStr, out long fileId))
-                {
-                    Debug.LogWarning($"Unable to load guid and local id at path: {assetPath}");
-                    continue;
-                }
-
-                _result.Guids.Add(guidStr);
-                _result.FileIDs.Add(fileId);
-                
-                var isIncluded = IsIncludedInAnalysis(assetPath);
-
-                if (!isIncluded)
-                    continue;
-
-                var type = AssetDatabase.GetMainAssetTypeAtPath(assetPath);
-                var validAssetType = IsValidType(assetPath, type);
-
-                if (!validAssetType)
-                    continue;
-
-                if (!CanAnalyzeType(type))
-                    continue;
-
-                var typeName = GetReadableTypeName(type);
-
-                var lines = TryReadAsLines(assetPath);
-
-#if LOGS
-                Debug.LogWarning("[Analyzing: " + assetPath + " Lines: " + lines.Length + "]");
-#endif
-
-                var refsData = new AssetReferencesData();
-
-                if (lines.Length > 0)
-                {
-                    for (var index = 0; index < lines.Length; index++)
-                    {
-                        var lineOriginal = lines[index];
-                        var line = lineOriginal;
-
-                        var systemLine = false;
-
-                        foreach (var keyword in _keyWordsToIgnore)
-                        {
-                            if (line.Contains(keyword))
-                            {
-                                systemLine = true;
-                                break;
-                            }
-                        }
-
-                        if (systemLine)
-                        {
-                            continue;
-                        }
-
-                        if (type == typeof(SceneAsset))
-                        {
-                            foreach (var keyword in _keyWordsToIgnoreInSceneAsset)
-                            {
-                                if (line.Contains(keyword))
-                                {
-                                    systemLine = true;
-                                    break;
-                                }
-                            }
-                        }
-
-                        if (systemLine)
-                        {
-                            continue;
-                        }
-
-                        if (line.Contains("guid:"))
-                        {
-                            var guidMatches = regexFileAndGuid.Matches(line);
-
-                            for (var i = 0; i < guidMatches.Count; i++)
-                            {
-                                var match = guidMatches[i];
-
-                                long.TryParse(match.Groups[1].Value, out var localFileID);
-                                var externalGuid = match.Groups[2].Value;
-
-                                var guidValid = !externalGuid.StartsWith("0000000000");
-                                var localIdValid = localFileID > 0;
-
-                                if (!localIdValid && !guidValid)
-                                {
-                                    Debug.LogWarning($"Both local id and guid are invalid at line {index}");
-                                    continue;
-                                }
-
-                                var referenceData = new ExternalReferenceRegistry(localIdValid, guidValid, localFileID,
-                                    externalGuid, index);
-                                refsData.ExternalReferences.Add(referenceData);
-
-                                var extendedPlaceDataRecorded = false;
-
-                                if (guidValid)
-                                {
-                                    referenceData.GuidAssetPath = AssetDatabase.GUIDToAssetPath(externalGuid);
-                                    referenceData.GuidExistsInAssets = VerifyGuidResolves(
-                                        referenceData.GuidAssetPath, guidResolveCache);
-
-                                    if (!referenceData.GuidExistsInAssets)
-                                    {
-                                        RecordGuidPlaceData(index, lines, referenceData);
-                                        extendedPlaceDataRecorded = true;
-                                    }
-                                }
-
-                                if (!extendedPlaceDataRecorded)
-                                {
-                                    referenceData.Sample.Add(lines[index]);
-                                }
-
-                                FindFieldType(regexTypeStart, index, lines, referenceData);
-                            }
-                        }
-                        else if (line.Contains("fileID:"))
-                        {
-                            var fileIdMatches = regexFileID.Matches(line);
-
-                            for (var i = 0; i < fileIdMatches.Count; i++)
-                            {
-                                var match = fileIdMatches[i];
-                                var str = match.Value;
-
-                                str = str.Substring(9);
-                                str = str.Replace("}", string.Empty);
-
-                                var localFileID = str;
-
-#if LOGS
-                                Debug.Log($"Found FileID: {localFileID} [Length: {localFileID.Length}] at {index}");
-#endif
-
-                                if (localFileID == "0")
-                                {
-                                    refsData.EmptyFileIDs.Add(new EmptyLocalFileIDRegistry(index));
-                                }
-                                else
-                                {
-                                    if (long.TryParse(localFileID, out var id))
-                                    {
-                                        refsData.LocalReferences.Add(new LocalReferenceRegistry(id, index));
-                                    }
-                                    else
-                                    {
-                                        Debug.LogWarning($"Unable to parse local id {localFileID}");
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-
-                foreach (var localId in refsData.LocalReferences)
-                {
-                    for (var index = 0; index < lines.Length; index++)
-                    {
-                        var line = lines[index];
-                        if (index != localId.Line && line.Contains(localId.IdStr))
-                        {
-                            localId.LocalUsagesCount++;
-                        }
-                    }
-                }
-
-                if (_enableMissingMethodScan || _enableTypeMismatchScan)
-                {
-                    ScanUnityEventReferences(lines, refsData, _enableMissingMethodScan, _enableTypeMismatchScan);
-                }
-
-                if (_enableMissingScriptScan)
-                {
-                    ScanMissingScripts(lines, refsData);
-                }
-
-                if (_enableInvalidLayerScan && validLayers != null)
-                {
-                    ScanInvalidLayers(lines, refsData, validLayers);
-                }
-
-                if (_enableDuplicateComponentScan && type == typeof(GameObject))
-                {
-                    ScanDuplicateComponents(assetPath, refsData);
-                }
-
-                _result.Assets.Add(new AssetData(assetPath, type, typeName, guidStr, refsData));
+                _result.FieldTypeCounters[pair.Key] = pair.Value;
             }
-            
-            GC.Collect();
-            yield return 0.05f;
-            GC.Collect();
 
-            foreach (var asset in _result.Assets)
-            {
-                foreach (var registry in asset.RefsData.LocalReferences)
-                {
-                    registry.ExistsInAssets = _result.FileIDs.Contains(registry.Id);
-                }
-
-                foreach (var registry in asset.RefsData.ExternalReferences)
-                {
-                    if (registry.FileIDValid)
-                    {
-                        registry.FileIDExistsInAssets = _result.FileIDs.Contains(registry.FileID)
-                                                        || asset.RefsData.LocalReferences.Any(x => x.Id == registry.FileID);
-                    }
-
-                    if (registry.GuidValid && registry.GuidExistsInAssets && registry.FileIDValid)
-                    {
-                        var fileIds = GetFileIdsForPath(registry.GuidAssetPath, fileIdCache);
-                        registry.FileIDExistsInTargetAsset = fileIds != null && fileIds.Contains(registry.FileID);
-                    }
-                    else
-                    {
-                        registry.FileIDExistsInTargetAsset = true;
-                    }
-                }
-                
-                asset.RefsData.CalculateCounters();
-
-                foreach (var registry in asset.RefsData.ExternalReferences)
-                {
-                    if (!string.IsNullOrWhiteSpace(registry.FieldType) && registry.WarningLevel > 0)
-                    {
-                        asset.MissingFieldTypes.Add(registry.FieldType);
-                        
-                        if (!_result.FieldTypeCounters.ContainsKey(registry.FieldType))
-                            _result.FieldTypeCounters[registry.FieldType] = 1;
-                        else
-                            _result.FieldTypeCounters[registry.FieldType] += 1;
-
-                        _result.FieldTypeSum++;
-                    }
-                }
-            }
+            _result.FieldTypeSum = output.FieldTypeSum;
 
             _result.MissingFileIDAndGuidCases = _result.Assets.Count(x => x.RefsData.MissingFileIDAndGuid > 0);
             _result.MissingGuidCases = _result.Assets.Count(x => x.RefsData.MissingGuid > 0);
@@ -469,405 +168,9 @@ namespace MissingReferencesHunter
             if (_enableInvalidLayerScan)
                 _result.OutputDescription += $" | Invalid Layers: {_result.InvalidLayerCases}";
 
-            EditorUtility.ClearProgressBar();
-            
             Debug.Log(_result.OutputDescription);
 
             _analysisOngoing = false;
-
-            string[] TryReadAsLines(string path)
-            {
-                if (Directory.Exists(path))
-                    return Array.Empty<string>();
-
-                try
-                {
-                    return File.ReadAllLines(path);
-                }
-                catch (Exception e)
-                {
-                    Debug.LogError(e);
-                    return Array.Empty<string>();
-                }
-            }
-            
-            string GetReadableTypeName(Type type)
-            {
-                string typeName;
-            
-                if (type != null)
-                {
-                    typeName = type.ToString();
-                    typeName = typeName.Replace("UnityEngine.", string.Empty);
-                    typeName = typeName.Replace("UnityEditor.", string.Empty);
-                }
-                else
-                {
-                    typeName = "Missing Type";
-                }
-
-                return typeName;
-            }
-            
-            bool IsIncludedInAnalysis(string path)
-            {
-                var notExcluded = _defaultIgnorePatterns.All(pattern 
-                    => string.IsNullOrEmpty(pattern) || !Regex.Match(path, pattern).Success);
-
-                return notExcluded;
-            }
-            
-            bool IsValidType(string path, Type type)
-            {
-                if (type != null)
-                {
-                    if (type == typeof(DefaultAsset)) // DefaultAsset goes for e.g. folders.
-                    {
-                        return false;
-                    }
-                    
-                    return true;
-                }
-                Debug.LogWarning($"Invalid asset type found at {path}");
-                return false;
-            }
-
-            bool CanAnalyzeType(Type type)
-            {
-                return type == typeof(GameObject) || type == typeof(SceneAsset) 
-                                                  || DerivesFromOrEqual(type, typeof(ScriptableObject));
-            }
-            
-            static bool DerivesFromOrEqual(Type a, Type b)
-            {
-#if UNITY_WSA && ENABLE_DOTNET && !UNITY_EDITOR
-                return b == a || b.GetTypeInfo().IsAssignableFrom(a.GetTypeInfo());
-#else
-                return b == a || b.IsAssignableFrom(a);
-#endif
-            }
-        }
-
-        private static bool VerifyGuidResolves(string guidPath, Dictionary<string, bool> cache)
-        {
-            if (string.IsNullOrEmpty(guidPath))
-                return false;
-
-            if (cache.TryGetValue(guidPath, out var cached))
-                return cached;
-
-            var asset = AssetDatabase.LoadAssetAtPath<Object>(guidPath);
-            var resolved = asset != null;
-            cache[guidPath] = resolved;
-            return resolved;
-        }
-
-        private static HashSet<long> GetFileIdsForPath(string assetPath, Dictionary<string, HashSet<long>> cache)
-        {
-            if (string.IsNullOrEmpty(assetPath))
-                return null;
-
-            if (cache.TryGetValue(assetPath, out var cached))
-                return cached;
-
-            HashSet<long> fileIds = null;
-            var allAssets = AssetDatabase.LoadAllAssetsAtPath(assetPath);
-            if (allAssets != null && allAssets.Length > 0)
-            {
-                fileIds = new HashSet<long>();
-                foreach (var subAsset in allAssets)
-                {
-                    if (subAsset == null) continue;
-                    if (AssetDatabase.TryGetGUIDAndLocalFileIdentifier(subAsset, out _, out long subFileId))
-                        fileIds.Add(subFileId);
-                }
-            }
-
-            cache[assetPath] = fileIds;
-            return fileIds;
-        }
-
-        private static void FindFieldType(Regex regexTypeStart, int index, string[] lines, ExternalReferenceRegistry referenceData)
-        {
-            for (var j = index; j >= 0; j--)
-            {
-                var match = regexTypeStart.Match(lines[j]);
-                if (match.Success)
-                {
-                    var typeValue = match.Value.Replace(":", string.Empty).Trim();
-                    if (!string.IsNullOrWhiteSpace(typeValue))
-                    {
-                        referenceData.FieldType = typeValue;
-                        break;
-                    }
-                }
-            }
-        }
-        
-        private static void RecordGuidPlaceData(int index, string[] lines, ExternalReferenceRegistry referenceData)
-        {
-            for (var j = index - 4; j < index + 5; j++)
-            {
-                if (j >= 0 && j < lines.Length)
-                {
-                    referenceData.Sample.Add(lines[j]);
-                }
-            }
-
-            var holderName = string.Empty;
-            const string nameTag = "m_Name:";
-                                        
-            for (var j = index; j >= 0; j--)
-            {
-                if (lines[j].Contains(nameTag))
-                {
-                    var nameCandidate = lines[j].Replace(nameTag, string.Empty).Trim();
-
-                    if (!string.IsNullOrWhiteSpace(nameCandidate))
-                    {
-                        holderName = nameCandidate;
-                        break;
-                    }
-                }
-            }
-
-            referenceData.HolderName = holderName;
-        }
-
-        private static readonly Regex TargetAssemblyTypeRegex = new Regex(@"m_TargetAssemblyTypeName:\s*([\w.]+)");
-        private static readonly Regex MethodNameRegex = new Regex(@"m_MethodName:\s*(\w+)");
-        private static readonly Regex ArgAssemblyTypeRegex = new Regex(@"m_ObjectArgumentAssemblyTypeName:\s*([\w.]+)");
-
-        private static void ScanUnityEventReferences(string[] lines, AssetReferencesData refsData,
-            bool checkMissingMethods, bool checkTypeMismatches)
-        {
-            var targetTypes = new List<(string typeName, int line)>();
-            var methodNames = new List<(string methodName, int line)>();
-            var argTypes = new List<(string typeName, int line)>();
-
-            for (var i = 0; i < lines.Length; i++)
-            {
-                var line = lines[i];
-
-                if (checkMissingMethods)
-                {
-                    var targetMatch = TargetAssemblyTypeRegex.Match(line);
-                    if (targetMatch.Success)
-                    {
-                        targetTypes.Add((targetMatch.Groups[1].Value, i));
-                    }
-
-                    var methodMatch = MethodNameRegex.Match(line);
-                    if (methodMatch.Success)
-                    {
-                        methodNames.Add((methodMatch.Groups[1].Value, i));
-                    }
-                }
-
-                if (checkTypeMismatches)
-                {
-                    var argMatch = ArgAssemblyTypeRegex.Match(line);
-                    if (argMatch.Success)
-                    {
-                        argTypes.Add((argMatch.Groups[1].Value, i));
-                    }
-                }
-            }
-
-            if (checkMissingMethods)
-            {
-                var pairCount = Math.Min(targetTypes.Count, methodNames.Count);
-                for (var i = 0; i < pairCount; i++)
-                {
-                    var (className, _) = targetTypes[i];
-                    var (methodName, methodLine) = methodNames[i];
-
-                    if (string.IsNullOrEmpty(className))
-                        continue;
-
-                    var targetType = ResolveType(className);
-                    if (targetType == null)
-                        continue;
-
-                    var methods = targetType.GetMethods(
-                        BindingFlags.Public | BindingFlags.NonPublic |
-                        BindingFlags.Instance | BindingFlags.Static);
-                    var methodExists = methods.Any(m => m.Name == methodName);
-
-                    if (!methodExists)
-                    {
-                        refsData.MissingMethods.Add(new MissingMethodEntry(className, methodName, methodLine));
-                    }
-                }
-            }
-
-            if (checkTypeMismatches)
-            {
-                foreach (var (typeName, line) in argTypes)
-                {
-                    if (string.IsNullOrEmpty(typeName))
-                        continue;
-
-                    var resolvedType = ResolveType(typeName);
-                    if (resolvedType == null)
-                    {
-                        refsData.TypeMismatches.Add(new TypeMismatchEntry(typeName, line));
-                    }
-                }
-            }
-        }
-
-        private static Type ResolveType(string typeName)
-        {
-            var cleanName = typeName.Split(',')[0].Trim();
-
-            var type = Type.GetType(cleanName);
-            if (type != null) return type;
-
-            type = Type.GetType($"{cleanName}, Assembly-CSharp, Version=0.0.0.0, Culture=neutral, PublicKeyToken=null");
-            if (type != null) return type;
-
-            foreach (var assembly in AppDomain.CurrentDomain.GetAssemblies())
-            {
-                try
-                {
-                    type = assembly.GetType(cleanName);
-                    if (type != null) return type;
-                }
-                catch
-                {
-                    // skip assemblies that throw on GetType
-                }
-            }
-
-            return null;
-        }
-
-        private static readonly Regex ScriptGuidRegex = new Regex(@"m_Script:\s*\{fileID:\s*\d+,\s*guid:\s*([a-f0-9]{32})");
-        private static readonly Regex LayerRegex = new Regex(@"^\s*m_Layer:\s*(\d+)\s*$");
-
-        private static void ScanMissingScripts(string[] lines, AssetReferencesData refsData)
-        {
-            for (var i = 0; i < lines.Length; i++)
-            {
-                var match = ScriptGuidRegex.Match(lines[i]);
-                if (match.Success)
-                {
-                    var guid = match.Groups[1].Value;
-                    if (guid.StartsWith("0000000000"))
-                        continue;
-
-                    var scriptPath = AssetDatabase.GUIDToAssetPath(guid);
-                    if (string.IsNullOrEmpty(scriptPath))
-                    {
-                        refsData.MissingScripts.Add(new MissingScriptEntry(guid, i));
-                    }
-                }
-            }
-        }
-
-        private static void ScanInvalidLayers(string[] lines, AssetReferencesData refsData, HashSet<int> validLayers)
-        {
-            for (var i = 0; i < lines.Length; i++)
-            {
-                var match = LayerRegex.Match(lines[i]);
-                if (match.Success)
-                {
-                    var layerIndex = int.Parse(match.Groups[1].Value);
-                    if (!validLayers.Contains(layerIndex))
-                    {
-                        refsData.InvalidLayers.Add(new InvalidLayerEntry(layerIndex, i));
-                    }
-                }
-            }
-        }
-
-        private static HashSet<int> LoadValidLayers()
-        {
-            var validLayers = new HashSet<int>();
-            var tagManagerPath = "ProjectSettings/TagManager.asset";
-
-            if (!File.Exists(tagManagerPath))
-                return validLayers;
-
-            string[] lines;
-            try
-            {
-                lines = File.ReadAllLines(tagManagerPath);
-            }
-            catch
-            {
-                return validLayers;
-            }
-
-            var inLayers = false;
-            var layerIndex = 0;
-
-            foreach (var line in lines)
-            {
-                var trimmed = line.TrimStart();
-
-                if (!inLayers)
-                {
-                    if (trimmed.StartsWith("layers:"))
-                    {
-                        inLayers = true;
-                    }
-                    continue;
-                }
-
-                if (layerIndex >= 32)
-                    break;
-
-                if (trimmed.StartsWith("- "))
-                {
-                    var name = trimmed.Substring(2).Trim();
-                    if (!string.IsNullOrEmpty(name))
-                    {
-                        validLayers.Add(layerIndex);
-                    }
-                    layerIndex++;
-                }
-                else if (!line.StartsWith(" ") && !line.StartsWith("\t"))
-                {
-                    break;
-                }
-            }
-
-            return validLayers;
-        }
-
-        private static void ScanDuplicateComponents(string assetPath, AssetReferencesData refsData)
-        {
-            var go = AssetDatabase.LoadAssetAtPath<GameObject>(assetPath);
-            if (go == null) return;
-
-            var allTransforms = go.GetComponentsInChildren<Transform>(true);
-
-            foreach (var t in allTransforms)
-            {
-                var childGo = t.gameObject;
-                var components = childGo.GetComponents<Component>();
-                var typeCounts = new Dictionary<Type, int>();
-
-                foreach (var comp in components)
-                {
-                    if (comp == null) continue;
-                    var type = comp.GetType();
-                    if (!typeCounts.ContainsKey(type))
-                        typeCounts[type] = 0;
-                    typeCounts[type]++;
-                }
-
-                foreach (var kvp in typeCounts)
-                {
-                    if (kvp.Value > 1)
-                    {
-                        refsData.DuplicateComponents.Add(new DuplicateComponentEntry(
-                            kvp.Key.Name, kvp.Value, childGo.name));
-                    }
-                }
-            }
         }
         
         private void OnGUI()
@@ -2031,6 +1334,1401 @@ namespace MissingReferencesHunter
 
             _lastTimeWaitStarted = null;
             return enumerator.MoveNext();
+        }
+    }
+
+    /// <summary>
+    /// UI-independent missing references analysis shared by <see cref="MissingReferencesWindow"/>
+    /// and <see cref="MissingReferencesHunterApi"/>.
+    /// </summary>
+    internal static class MissingReferencesAnalysis
+    {
+        internal sealed class Settings
+        {
+            public bool ScanMissingMethods { get; set; }
+            public bool ScanTypeMismatches { get; set; }
+            public bool ScanMissingScripts { get; set; }
+            public bool ScanDuplicateComponents { get; set; }
+            public bool ScanInvalidLayers { get; set; }
+            public IReadOnlyList<string> IgnoredPatterns { get; set; }
+        }
+
+        internal sealed class Output
+        {
+            /// <summary>
+            /// Every analyzed asset (with or without issues).
+            /// </summary>
+            public List<AssetData> Assets { get; } = new List<AssetData>();
+            public Dictionary<string, int> FieldTypeCounters { get; } = new Dictionary<string, int>();
+            public int FieldTypeSum { get; set; }
+        }
+
+        internal static readonly IReadOnlyList<string> DefaultIgnorePatterns = new List<string>
+        {
+            @"ProjectSettings/",
+            @"Packages/",
+            @"\.asmdef$",
+            @"link\.xml$",
+            @"\.csv$",
+            @"\.md$",
+            @"\.json$",
+            @"\.xml$",
+            @"\.txt$"
+        };
+
+        private static readonly List<string> KeyWordsToIgnore = new List<string>
+        {
+            "objectReference: {fileID:",
+            "m_CorrespondingSourceObject: {fileID:",
+            "m_PrefabInstance: {fileID:",
+            "m_PrefabAsset: {fileID:",
+            "m_GameObject: {fileID:",
+            "m_Script: {fileID:",
+            "m_Icon: {fileID:",
+            "m_Father: {fileID:"
+        };
+
+        private static readonly List<string> KeyWordsToIgnoreInSceneAsset = new List<string>
+        {
+            "m_OcclusionCullingData: {fileID:",
+            "m_HaloTexture: {fileID:",
+            "m_CustomReflection: {fileID:",
+            "m_Sun: {fileID:",
+            "m_LightmapParameters: {fileID:",
+            "m_LightingDataAsset: {fileID:",
+            "m_LightingSettings: {fileID:",
+            "m_NavMeshData: {fileID:",
+            "m_Icon: {fileID:",
+            "m_StaticBatchRoot: {fileID:",
+            "m_ProbeAnchor: {fileID:",
+            "m_LightProbeVolumeOverride: {fileID:",
+            "m_Cookie: {fileID:",
+            "m_Flare: {fileID:",
+            "m_TargetTexture: {fileID:",
+        };
+
+        /// <summary>
+        /// Scans the project the same way the "Run Analysis" button does. Yielded floats are pauses for GC only.
+        /// The progress bar is always cleared when the routine ends or throws.
+        /// </summary>
+        internal static IEnumerator Run(Settings settings, Output output)
+        {
+            try
+            {
+                var guidResolveCache = new Dictionary<string, bool>();
+                var fileIdCache = new Dictionary<string, HashSet<long>>();
+                var projectFileIds = new HashSet<long>();
+
+                var assetPaths = AssetDatabase.GetAllAssetPaths().ToList();
+
+                HashSet<int> validLayers = null;
+                if (settings.ScanInvalidLayers)
+                {
+                    validLayers = LoadValidLayers();
+                }
+
+                EditorUtility.ClearProgressBar();
+            
+                var regexFileAndGuid = new Regex(@"fileID: (\d+), guid: ([a-f0-9]{32})");
+                var regexFileID = new Regex(@"{fileID: \d+}");
+                var regexTypeStart = new Regex(@"^[a-zA-Z0-9_ ]+:");
+            
+                var count = 0;
+                for (var assetIndex = 0; assetIndex < assetPaths.Count; assetIndex++)
+                {
+                    if (assetIndex % 20000 == 0)
+                    {
+                        GC.Collect();
+                        yield return 0.05f;
+                        GC.Collect();
+                    }
+                
+                    var assetPath = assetPaths[assetIndex];
+                    EditorUtility.DisplayProgressBar("Missing References", "Searching for missing references",
+                        (float)count / assetPaths.Count);
+                    count++;
+
+                    var assetObject = AssetDatabase.LoadAssetAtPath<Object>(assetPath);
+
+                    if (assetObject == null)
+                    {
+                        Debug.LogWarning($"Unable to load an asset at path: {assetPath}");
+                        continue;
+                    }
+
+                    if (!AssetDatabase.TryGetGUIDAndLocalFileIdentifier(assetObject, out var guidStr, out long fileId))
+                    {
+                        Debug.LogWarning($"Unable to load guid and local id at path: {assetPath}");
+                        continue;
+                    }
+
+                    projectFileIds.Add(fileId);
+                
+                    var isIncluded = IsIncludedInAnalysis(assetPath);
+
+                    if (!isIncluded)
+                        continue;
+
+                    var type = AssetDatabase.GetMainAssetTypeAtPath(assetPath);
+                    var validAssetType = IsValidType(assetPath, type);
+
+                    if (!validAssetType)
+                        continue;
+
+                    if (!CanAnalyzeType(type))
+                        continue;
+
+                    var typeName = GetReadableTypeName(type);
+
+                    var lines = TryReadAsLines(assetPath);
+
+#if LOGS
+                    Debug.LogWarning("[Analyzing: " + assetPath + " Lines: " + lines.Length + "]");
+#endif
+
+                    var refsData = new AssetReferencesData();
+
+                    if (lines.Length > 0)
+                    {
+                        for (var index = 0; index < lines.Length; index++)
+                        {
+                            var lineOriginal = lines[index];
+                            var line = lineOriginal;
+
+                            var systemLine = false;
+
+                            foreach (var keyword in KeyWordsToIgnore)
+                            {
+                                if (line.Contains(keyword))
+                                {
+                                    systemLine = true;
+                                    break;
+                                }
+                            }
+
+                            if (systemLine)
+                            {
+                                continue;
+                            }
+
+                            if (type == typeof(SceneAsset))
+                            {
+                                foreach (var keyword in KeyWordsToIgnoreInSceneAsset)
+                                {
+                                    if (line.Contains(keyword))
+                                    {
+                                        systemLine = true;
+                                        break;
+                                    }
+                                }
+                            }
+
+                            if (systemLine)
+                            {
+                                continue;
+                            }
+
+                            if (line.Contains("guid:"))
+                            {
+                                var guidMatches = regexFileAndGuid.Matches(line);
+
+                                for (var i = 0; i < guidMatches.Count; i++)
+                                {
+                                    var match = guidMatches[i];
+
+                                    long.TryParse(match.Groups[1].Value, out var localFileID);
+                                    var externalGuid = match.Groups[2].Value;
+
+                                    var guidValid = !externalGuid.StartsWith("0000000000");
+                                    var localIdValid = localFileID > 0;
+
+                                    if (!localIdValid && !guidValid)
+                                    {
+                                        Debug.LogWarning($"Both local id and guid are invalid at line {index}");
+                                        continue;
+                                    }
+
+                                    var referenceData = new ExternalReferenceRegistry(localIdValid, guidValid, localFileID,
+                                        externalGuid, index);
+                                    refsData.ExternalReferences.Add(referenceData);
+
+                                    var extendedPlaceDataRecorded = false;
+
+                                    if (guidValid)
+                                    {
+                                        referenceData.GuidAssetPath = AssetDatabase.GUIDToAssetPath(externalGuid);
+                                        referenceData.GuidExistsInAssets = VerifyGuidResolves(
+                                            referenceData.GuidAssetPath, guidResolveCache);
+
+                                        if (!referenceData.GuidExistsInAssets)
+                                        {
+                                            RecordGuidPlaceData(index, lines, referenceData);
+                                            extendedPlaceDataRecorded = true;
+                                        }
+                                    }
+
+                                    if (!extendedPlaceDataRecorded)
+                                    {
+                                        referenceData.Sample.Add(lines[index]);
+                                    }
+
+                                    FindFieldType(regexTypeStart, index, lines, referenceData);
+                                }
+                            }
+                            else if (line.Contains("fileID:"))
+                            {
+                                var fileIdMatches = regexFileID.Matches(line);
+
+                                for (var i = 0; i < fileIdMatches.Count; i++)
+                                {
+                                    var match = fileIdMatches[i];
+                                    var str = match.Value;
+
+                                    str = str.Substring(9);
+                                    str = str.Replace("}", string.Empty);
+
+                                    var localFileID = str;
+
+#if LOGS
+                                    Debug.Log($"Found FileID: {localFileID} [Length: {localFileID.Length}] at {index}");
+#endif
+
+                                    if (localFileID == "0")
+                                    {
+                                        refsData.EmptyFileIDs.Add(new EmptyLocalFileIDRegistry(index));
+                                    }
+                                    else
+                                    {
+                                        if (long.TryParse(localFileID, out var id))
+                                        {
+                                            refsData.LocalReferences.Add(new LocalReferenceRegistry(id, index));
+                                        }
+                                        else
+                                        {
+                                            Debug.LogWarning($"Unable to parse local id {localFileID}");
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    foreach (var localId in refsData.LocalReferences)
+                    {
+                        for (var index = 0; index < lines.Length; index++)
+                        {
+                            var line = lines[index];
+                            if (index != localId.Line && line.Contains(localId.IdStr))
+                            {
+                                localId.LocalUsagesCount++;
+                            }
+                        }
+                    }
+
+                    if (settings.ScanMissingMethods || settings.ScanTypeMismatches)
+                    {
+                        ScanUnityEventReferences(lines, refsData, settings.ScanMissingMethods, settings.ScanTypeMismatches);
+                    }
+
+                    if (settings.ScanMissingScripts)
+                    {
+                        ScanMissingScripts(lines, refsData);
+                    }
+
+                    if (settings.ScanInvalidLayers && validLayers != null)
+                    {
+                        ScanInvalidLayers(lines, refsData, validLayers);
+                    }
+
+                    if (settings.ScanDuplicateComponents && type == typeof(GameObject))
+                    {
+                        ScanDuplicateComponents(assetPath, refsData);
+                    }
+
+                    output.Assets.Add(new AssetData(assetPath, type, typeName, guidStr, refsData));
+                }
+            
+                GC.Collect();
+                yield return 0.05f;
+                GC.Collect();
+
+                foreach (var asset in output.Assets)
+                {
+                    foreach (var registry in asset.RefsData.LocalReferences)
+                    {
+                        registry.ExistsInAssets = projectFileIds.Contains(registry.Id);
+                    }
+
+                    foreach (var registry in asset.RefsData.ExternalReferences)
+                    {
+                        if (registry.FileIDValid)
+                        {
+                            registry.FileIDExistsInAssets = projectFileIds.Contains(registry.FileID)
+                                                            || asset.RefsData.LocalReferences.Any(x => x.Id == registry.FileID);
+                        }
+
+                        if (registry.GuidValid && registry.GuidExistsInAssets && registry.FileIDValid)
+                        {
+                            var fileIds = GetFileIdsForPath(registry.GuidAssetPath, fileIdCache);
+                            registry.FileIDExistsInTargetAsset = fileIds != null && fileIds.Contains(registry.FileID);
+                        }
+                        else
+                        {
+                            registry.FileIDExistsInTargetAsset = true;
+                        }
+                    }
+                
+                    asset.RefsData.CalculateCounters();
+
+                    foreach (var registry in asset.RefsData.ExternalReferences)
+                    {
+                        if (!string.IsNullOrWhiteSpace(registry.FieldType) && registry.WarningLevel > 0)
+                        {
+                            asset.MissingFieldTypes.Add(registry.FieldType);
+                        
+                            if (!output.FieldTypeCounters.ContainsKey(registry.FieldType))
+                                output.FieldTypeCounters[registry.FieldType] = 1;
+                            else
+                                output.FieldTypeCounters[registry.FieldType] += 1;
+
+                            output.FieldTypeSum++;
+                        }
+                    }
+                }
+            }
+            finally
+            {
+                EditorUtility.ClearProgressBar();
+            }
+
+            string[] TryReadAsLines(string path)
+            {
+                if (Directory.Exists(path))
+                    return Array.Empty<string>();
+
+                try
+                {
+                    return File.ReadAllLines(path);
+                }
+                catch (Exception e)
+                {
+                    Debug.LogError(e);
+                    return Array.Empty<string>();
+                }
+            }
+            
+            string GetReadableTypeName(Type type)
+            {
+                string typeName;
+            
+                if (type != null)
+                {
+                    typeName = type.ToString();
+                    typeName = typeName.Replace("UnityEngine.", string.Empty);
+                    typeName = typeName.Replace("UnityEditor.", string.Empty);
+                }
+                else
+                {
+                    typeName = "Missing Type";
+                }
+
+                return typeName;
+            }
+            
+            bool IsIncludedInAnalysis(string path)
+            {
+                var notExcluded = settings.IgnoredPatterns.All(pattern 
+                    => string.IsNullOrEmpty(pattern) || !Regex.Match(path, pattern).Success);
+
+                return notExcluded;
+            }
+            
+            bool IsValidType(string path, Type type)
+            {
+                if (type != null)
+                {
+                    if (type == typeof(DefaultAsset)) // DefaultAsset goes for e.g. folders.
+                    {
+                        return false;
+                    }
+                    
+                    return true;
+                }
+                Debug.LogWarning($"Invalid asset type found at {path}");
+                return false;
+            }
+
+            bool CanAnalyzeType(Type type)
+            {
+                return type == typeof(GameObject) || type == typeof(SceneAsset) 
+                                                  || DerivesFromOrEqual(type, typeof(ScriptableObject));
+            }
+            
+            static bool DerivesFromOrEqual(Type a, Type b)
+            {
+#if UNITY_WSA && ENABLE_DOTNET && !UNITY_EDITOR
+                return b == a || b.GetTypeInfo().IsAssignableFrom(a.GetTypeInfo());
+#else
+                return b == a || b.IsAssignableFrom(a);
+#endif
+            }
+        }
+
+        private static bool VerifyGuidResolves(string guidPath, Dictionary<string, bool> cache)
+        {
+            if (string.IsNullOrEmpty(guidPath))
+                return false;
+
+            if (cache.TryGetValue(guidPath, out var cached))
+                return cached;
+
+            var asset = AssetDatabase.LoadAssetAtPath<Object>(guidPath);
+            var resolved = asset != null;
+            cache[guidPath] = resolved;
+            return resolved;
+        }
+
+        private static HashSet<long> GetFileIdsForPath(string assetPath, Dictionary<string, HashSet<long>> cache)
+        {
+            if (string.IsNullOrEmpty(assetPath))
+                return null;
+
+            if (cache.TryGetValue(assetPath, out var cached))
+                return cached;
+
+            HashSet<long> fileIds = null;
+            var allAssets = AssetDatabase.LoadAllAssetsAtPath(assetPath);
+            if (allAssets != null && allAssets.Length > 0)
+            {
+                fileIds = new HashSet<long>();
+                foreach (var subAsset in allAssets)
+                {
+                    if (subAsset == null) continue;
+                    if (AssetDatabase.TryGetGUIDAndLocalFileIdentifier(subAsset, out _, out long subFileId))
+                        fileIds.Add(subFileId);
+                }
+            }
+
+            cache[assetPath] = fileIds;
+            return fileIds;
+        }
+
+        private static void FindFieldType(Regex regexTypeStart, int index, string[] lines, ExternalReferenceRegistry referenceData)
+        {
+            for (var j = index; j >= 0; j--)
+            {
+                var match = regexTypeStart.Match(lines[j]);
+                if (match.Success)
+                {
+                    var typeValue = match.Value.Replace(":", string.Empty).Trim();
+                    if (!string.IsNullOrWhiteSpace(typeValue))
+                    {
+                        referenceData.FieldType = typeValue;
+                        break;
+                    }
+                }
+            }
+        }
+        
+        private static void RecordGuidPlaceData(int index, string[] lines, ExternalReferenceRegistry referenceData)
+        {
+            for (var j = index - 4; j < index + 5; j++)
+            {
+                if (j >= 0 && j < lines.Length)
+                {
+                    referenceData.Sample.Add(lines[j]);
+                }
+            }
+
+            var holderName = string.Empty;
+            const string nameTag = "m_Name:";
+                                        
+            for (var j = index; j >= 0; j--)
+            {
+                if (lines[j].Contains(nameTag))
+                {
+                    var nameCandidate = lines[j].Replace(nameTag, string.Empty).Trim();
+
+                    if (!string.IsNullOrWhiteSpace(nameCandidate))
+                    {
+                        holderName = nameCandidate;
+                        break;
+                    }
+                }
+            }
+
+            referenceData.HolderName = holderName;
+        }
+
+        private static readonly Regex TargetAssemblyTypeRegex = new Regex(@"m_TargetAssemblyTypeName:\s*([\w.]+)");
+        private static readonly Regex MethodNameRegex = new Regex(@"m_MethodName:\s*(\w+)");
+        private static readonly Regex ArgAssemblyTypeRegex = new Regex(@"m_ObjectArgumentAssemblyTypeName:\s*([\w.]+)");
+
+        private static void ScanUnityEventReferences(string[] lines, AssetReferencesData refsData,
+            bool checkMissingMethods, bool checkTypeMismatches)
+        {
+            var targetTypes = new List<(string typeName, int line)>();
+            var methodNames = new List<(string methodName, int line)>();
+            var argTypes = new List<(string typeName, int line)>();
+
+            for (var i = 0; i < lines.Length; i++)
+            {
+                var line = lines[i];
+
+                if (checkMissingMethods)
+                {
+                    var targetMatch = TargetAssemblyTypeRegex.Match(line);
+                    if (targetMatch.Success)
+                    {
+                        targetTypes.Add((targetMatch.Groups[1].Value, i));
+                    }
+
+                    var methodMatch = MethodNameRegex.Match(line);
+                    if (methodMatch.Success)
+                    {
+                        methodNames.Add((methodMatch.Groups[1].Value, i));
+                    }
+                }
+
+                if (checkTypeMismatches)
+                {
+                    var argMatch = ArgAssemblyTypeRegex.Match(line);
+                    if (argMatch.Success)
+                    {
+                        argTypes.Add((argMatch.Groups[1].Value, i));
+                    }
+                }
+            }
+
+            if (checkMissingMethods)
+            {
+                var pairCount = Math.Min(targetTypes.Count, methodNames.Count);
+                for (var i = 0; i < pairCount; i++)
+                {
+                    var (className, _) = targetTypes[i];
+                    var (methodName, methodLine) = methodNames[i];
+
+                    if (string.IsNullOrEmpty(className))
+                        continue;
+
+                    var targetType = ResolveType(className);
+                    if (targetType == null)
+                        continue;
+
+                    var methods = targetType.GetMethods(
+                        BindingFlags.Public | BindingFlags.NonPublic |
+                        BindingFlags.Instance | BindingFlags.Static);
+                    var methodExists = methods.Any(m => m.Name == methodName);
+
+                    if (!methodExists)
+                    {
+                        refsData.MissingMethods.Add(new MissingMethodEntry(className, methodName, methodLine));
+                    }
+                }
+            }
+
+            if (checkTypeMismatches)
+            {
+                foreach (var (typeName, line) in argTypes)
+                {
+                    if (string.IsNullOrEmpty(typeName))
+                        continue;
+
+                    var resolvedType = ResolveType(typeName);
+                    if (resolvedType == null)
+                    {
+                        refsData.TypeMismatches.Add(new TypeMismatchEntry(typeName, line));
+                    }
+                }
+            }
+        }
+
+        private static Type ResolveType(string typeName)
+        {
+            var cleanName = typeName.Split(',')[0].Trim();
+
+            var type = Type.GetType(cleanName);
+            if (type != null) return type;
+
+            type = Type.GetType($"{cleanName}, Assembly-CSharp, Version=0.0.0.0, Culture=neutral, PublicKeyToken=null");
+            if (type != null) return type;
+
+            foreach (var assembly in AppDomain.CurrentDomain.GetAssemblies())
+            {
+                try
+                {
+                    type = assembly.GetType(cleanName);
+                    if (type != null) return type;
+                }
+                catch
+                {
+                    // skip assemblies that throw on GetType
+                }
+            }
+
+            return null;
+        }
+
+        private static readonly Regex ScriptGuidRegex = new Regex(@"m_Script:\s*\{fileID:\s*\d+,\s*guid:\s*([a-f0-9]{32})");
+        private static readonly Regex LayerRegex = new Regex(@"^\s*m_Layer:\s*(\d+)\s*$");
+
+        private static void ScanMissingScripts(string[] lines, AssetReferencesData refsData)
+        {
+            for (var i = 0; i < lines.Length; i++)
+            {
+                var match = ScriptGuidRegex.Match(lines[i]);
+                if (match.Success)
+                {
+                    var guid = match.Groups[1].Value;
+                    if (guid.StartsWith("0000000000"))
+                        continue;
+
+                    var scriptPath = AssetDatabase.GUIDToAssetPath(guid);
+                    if (string.IsNullOrEmpty(scriptPath))
+                    {
+                        refsData.MissingScripts.Add(new MissingScriptEntry(guid, i));
+                    }
+                }
+            }
+        }
+
+        private static void ScanInvalidLayers(string[] lines, AssetReferencesData refsData, HashSet<int> validLayers)
+        {
+            for (var i = 0; i < lines.Length; i++)
+            {
+                var match = LayerRegex.Match(lines[i]);
+                if (match.Success)
+                {
+                    var layerIndex = int.Parse(match.Groups[1].Value);
+                    if (!validLayers.Contains(layerIndex))
+                    {
+                        refsData.InvalidLayers.Add(new InvalidLayerEntry(layerIndex, i));
+                    }
+                }
+            }
+        }
+
+        private static HashSet<int> LoadValidLayers()
+        {
+            var validLayers = new HashSet<int>();
+            var tagManagerPath = "ProjectSettings/TagManager.asset";
+
+            if (!File.Exists(tagManagerPath))
+                return validLayers;
+
+            string[] lines;
+            try
+            {
+                lines = File.ReadAllLines(tagManagerPath);
+            }
+            catch
+            {
+                return validLayers;
+            }
+
+            var inLayers = false;
+            var layerIndex = 0;
+
+            foreach (var line in lines)
+            {
+                var trimmed = line.TrimStart();
+
+                if (!inLayers)
+                {
+                    if (trimmed.StartsWith("layers:"))
+                    {
+                        inLayers = true;
+                    }
+                    continue;
+                }
+
+                if (layerIndex >= 32)
+                    break;
+
+                if (trimmed.StartsWith("- "))
+                {
+                    var name = trimmed.Substring(2).Trim();
+                    if (!string.IsNullOrEmpty(name))
+                    {
+                        validLayers.Add(layerIndex);
+                    }
+                    layerIndex++;
+                }
+                else if (!line.StartsWith(" ") && !line.StartsWith("\t"))
+                {
+                    break;
+                }
+            }
+
+            return validLayers;
+        }
+
+        private static void ScanDuplicateComponents(string assetPath, AssetReferencesData refsData)
+        {
+            var go = AssetDatabase.LoadAssetAtPath<GameObject>(assetPath);
+            if (go == null) return;
+
+            var allTransforms = go.GetComponentsInChildren<Transform>(true);
+
+            foreach (var t in allTransforms)
+            {
+                var childGo = t.gameObject;
+                var components = childGo.GetComponents<Component>();
+                var typeCounts = new Dictionary<Type, int>();
+
+                foreach (var comp in components)
+                {
+                    if (comp == null) continue;
+                    var type = comp.GetType();
+                    if (!typeCounts.ContainsKey(type))
+                        typeCounts[type] = 0;
+                    typeCounts[type]++;
+                }
+
+                foreach (var kvp in typeCounts)
+                {
+                    if (kvp.Value > 1)
+                    {
+                        refsData.DuplicateComponents.Add(new DuplicateComponentEntry(
+                            kvp.Key.Name, kvp.Value, childGo.name));
+                    }
+                }
+            }
+        }
+    }
+
+    /// <summary>
+    /// Settings for <see cref="MissingReferencesHunterApi"/>. Defaults match the Missing References Hunter window defaults.
+    /// EditorPrefs are never read, so the result does not depend on the machine the analysis runs on.
+    /// Missing GUID references are always scanned (same as in the window).
+    /// </summary>
+    public class MissingReferencesHunterOptions
+    {
+        /// <summary>
+        /// UnityEvent references to methods that no longer exist on the target type ("&lt;Missing&gt;" callbacks).
+        /// </summary>
+        public bool ScanMissingMethods { get; set; } = true;
+
+        /// <summary>
+        /// UnityEvent argument types that cannot be resolved in any loaded assembly.
+        /// </summary>
+        public bool ScanTypeMismatches { get; set; } = true;
+
+        /// <summary>
+        /// Components referencing deleted or missing scripts.
+        /// </summary>
+        public bool ScanMissingScripts { get; set; } = true;
+
+        /// <summary>
+        /// Component types appearing more than once on the same GameObject in prefabs.
+        /// </summary>
+        public bool ScanDuplicateComponents { get; set; } = true;
+
+        /// <summary>
+        /// GameObject layer values not defined in ProjectSettings/TagManager.asset.
+        /// </summary>
+        public bool ScanInvalidLayers { get; set; } = true;
+
+        /// <summary>
+        /// Also report [Missing FileID] and [Missing Local FileID] cases (hidden by default in the window).
+        /// They are informational: listed in the report, but do not affect <see cref="MissingReferencesHunterReport.HasIssues"/>.
+        /// </summary>
+        public bool IncludeFileIDIssues { get; set; }
+
+        /// <summary>
+        /// Regex patterns of paths excluded from the analysis.
+        /// When null, the built-in defaults of the window are used.
+        /// </summary>
+        public List<string> IgnoredPatterns { get; set; }
+    }
+
+    public enum MissingReferencesIssueKind
+    {
+        /// <summary>
+        /// Neither the GUID nor the FileID exist in the project.
+        /// </summary>
+        MissingFileIDAndGuid,
+
+        /// <summary>
+        /// GUID does not resolve to a loadable asset (the FileID is either not set or known in the project).
+        /// The window's [Missing Guid] counter includes <see cref="MissingFileIDAndGuid"/> cases too.
+        /// </summary>
+        MissingGuid,
+        MissingMethod,
+        TypeMismatch,
+        MissingScript,
+        DuplicateComponent,
+        InvalidLayer,
+
+        /// <summary>
+        /// Informational: FileID not found in the referenced target asset (GUID resolves).
+        /// </summary>
+        MissingFileID,
+
+        /// <summary>
+        /// Informational: local FileID that is not used anywhere else in the asset nor in the project.
+        /// </summary>
+        MissingLocalFileID
+    }
+
+    public sealed class MissingReferencesIssue
+    {
+        internal MissingReferencesIssue(MissingReferencesIssueKind kind, int line, string details)
+        {
+            Kind = kind;
+            Line = line;
+            Details = details;
+        }
+
+        public MissingReferencesIssueKind Kind { get; }
+
+        /// <summary>
+        /// 1-based line in the asset file (as shown in the window), 0 when not applicable (duplicate components).
+        /// </summary>
+        public int Line { get; }
+
+        public string Details { get; }
+
+        /// <summary>
+        /// False for informational kinds (<see cref="MissingReferencesIssueKind.MissingFileID"/>,
+        /// <see cref="MissingReferencesIssueKind.MissingLocalFileID"/>) that the window hides by default.
+        /// </summary>
+        public bool IsWarning => Kind != MissingReferencesIssueKind.MissingFileID
+                                 && Kind != MissingReferencesIssueKind.MissingLocalFileID;
+
+        public override string ToString()
+        {
+            return Line > 0 ? $"{Kind} at line {Line}: {Details}" : $"{Kind}: {Details}";
+        }
+    }
+
+    public sealed class MissingReferencesHunterReportEntry
+    {
+        internal MissingReferencesHunterReportEntry(AssetData data, bool includeFileIDIssues)
+        {
+            Path = data.Path;
+            TypeName = data.TypeName;
+            Guid = data.Guid;
+            HasIssues = data.RefsData.HasWarnings;
+            Issues = CollectIssues(data.RefsData, includeFileIDIssues);
+        }
+
+        public string Path { get; }
+        public string TypeName { get; }
+        public string Guid { get; }
+
+        /// <summary>
+        /// All reported issues of the asset, informational ones included (see <see cref="MissingReferencesIssue.IsWarning"/>).
+        /// </summary>
+        public IReadOnlyList<MissingReferencesIssue> Issues { get; }
+
+        /// <summary>
+        /// True when the asset has at least one warning issue (same as the window's "Assets with issues" counter).
+        /// </summary>
+        public bool HasIssues { get; }
+
+        private static List<MissingReferencesIssue> CollectIssues(AssetReferencesData refsData, bool includeFileIDIssues)
+        {
+            var issues = new List<MissingReferencesIssue>();
+
+            foreach (var registry in refsData.ExternalReferences)
+            {
+                var place = string.Empty;
+
+                if (!string.IsNullOrEmpty(registry.HolderName))
+                    place += $" in [{registry.HolderName}]";
+
+                if (!string.IsNullOrEmpty(registry.FieldType))
+                    place += $" [{registry.FieldType}]";
+
+                if (registry.GuidValid && !registry.GuidExistsInAssets)
+                {
+                    var kind = registry.FileIDValid && !registry.FileIDExistsInAssets
+                        ? MissingReferencesIssueKind.MissingFileIDAndGuid
+                        : MissingReferencesIssueKind.MissingGuid;
+
+                    issues.Add(new MissingReferencesIssue(kind, registry.Line + 1,
+                        $"Broken GUID {registry.Guid} (fileID {registry.FileID}){place}"));
+                }
+                else if (includeFileIDIssues && registry.GuidValid && registry.GuidExistsInAssets
+                         && registry.FileIDValid && !registry.FileIDExistsInTargetAsset)
+                {
+                    issues.Add(new MissingReferencesIssue(MissingReferencesIssueKind.MissingFileID, registry.Line + 1,
+                        $"Broken FileID {registry.FileID} in '{registry.GuidAssetPath}'{place}"));
+                }
+            }
+
+            if (includeFileIDIssues)
+            {
+                foreach (var registry in refsData.LocalReferences.Where(x =>
+                             x.IdValid && x.LocalUsagesCount == 0 && !x.ExistsInAssets))
+                {
+                    issues.Add(new MissingReferencesIssue(MissingReferencesIssueKind.MissingLocalFileID,
+                        registry.Line + 1, $"Unknown FileID {registry.Id}"));
+                }
+            }
+
+            foreach (var entry in refsData.MissingMethods)
+            {
+                issues.Add(new MissingReferencesIssue(MissingReferencesIssueKind.MissingMethod, entry.Line + 1,
+                    $"{entry.ClassName}.{entry.MethodName}"));
+            }
+
+            foreach (var entry in refsData.TypeMismatches)
+            {
+                issues.Add(new MissingReferencesIssue(MissingReferencesIssueKind.TypeMismatch, entry.Line + 1,
+                    $"Unresolved argument type {entry.TypeName}"));
+            }
+
+            foreach (var entry in refsData.MissingScripts)
+            {
+                issues.Add(new MissingReferencesIssue(MissingReferencesIssueKind.MissingScript, entry.Line + 1,
+                    $"Missing script GUID {entry.ScriptGuid}"));
+            }
+
+            foreach (var entry in refsData.DuplicateComponents)
+            {
+                issues.Add(new MissingReferencesIssue(MissingReferencesIssueKind.DuplicateComponent, 0,
+                    $"[{entry.GameObjectName}] {entry.ComponentType} x{entry.Count}"));
+            }
+
+            foreach (var entry in refsData.InvalidLayers)
+            {
+                issues.Add(new MissingReferencesIssue(MissingReferencesIssueKind.InvalidLayer, entry.Line + 1,
+                    $"Layer {entry.LayerIndex} (undefined)"));
+            }
+
+            return issues;
+        }
+    }
+
+    public sealed class MissingReferencesHunterReport
+    {
+        internal MissingReferencesHunterReport(
+            List<MissingReferencesHunterReportEntry> assets,
+            int analyzedAssetsCount,
+            double durationSeconds)
+        {
+            Assets = assets;
+            AssetsWithIssues = assets.Where(x => x.HasIssues).ToList();
+            AnalyzedAssetsCount = analyzedAssetsCount;
+            DurationSeconds = durationSeconds;
+
+            var issuesCount = AssetsWithIssues.Sum(x => x.Issues.Count(issue => issue.IsWarning));
+
+            Summary = $"Missing References Hunter: {AssetsWithIssues.Count} asset(s) with {issuesCount} issue(s) " +
+                      $"found among {AnalyzedAssetsCount} analyzed asset(s).";
+        }
+
+        /// <summary>
+        /// Assets with at least one reported issue (informational ones included when
+        /// <see cref="MissingReferencesHunterOptions.IncludeFileIDIssues"/> is set). Sorted by path.
+        /// </summary>
+        public IReadOnlyList<MissingReferencesHunterReportEntry> Assets { get; }
+
+        /// <summary>
+        /// Assets with at least one warning issue.
+        /// </summary>
+        public IReadOnlyList<MissingReferencesHunterReportEntry> AssetsWithIssues { get; }
+
+        /// <summary>
+        /// Number of scanned prefabs, scenes and ScriptableObjects (after the ignored patterns are applied).
+        /// </summary>
+        public int AnalyzedAssetsCount { get; }
+
+        public double DurationSeconds { get; }
+
+        public string Summary { get; }
+
+        /// <summary>
+        /// Same as "Assets with issues" in the window: missing GUIDs, missing methods, type mismatches, missing scripts,
+        /// duplicate components and invalid layers. FileID issues are informational and never count.
+        /// </summary>
+        public bool HasIssues => AssetsWithIssues.Count > 0;
+
+        public int CountIssues(MissingReferencesIssueKind kind)
+        {
+            return Assets.Sum(x => x.Issues.Count(issue => issue.Kind == kind));
+        }
+
+        /// <summary>
+        /// Summary followed by one line per warning issue. Handy as an assertion message.
+        /// </summary>
+        public override string ToString()
+        {
+            var sb = new StringBuilder();
+            sb.AppendLine(Summary);
+
+            foreach (var asset in AssetsWithIssues)
+            {
+                foreach (var issue in asset.Issues.Where(x => x.IsWarning))
+                {
+                    sb.Append(asset.Path).Append(": ").Append(issue).AppendLine();
+                }
+            }
+
+            return sb.ToString();
+        }
+
+        public string ToJson()
+        {
+            var json = new ReportJsonWriter();
+
+            json.BeginObject();
+            json.Property("tool", "Missing References Hunter");
+            json.Property("unityVersion", Application.unityVersion);
+            json.Property("hasIssues", HasIssues);
+            json.Property("summary", Summary);
+            json.Property("durationSeconds", DurationSeconds);
+            json.Property("analyzedAssetsCount", AnalyzedAssetsCount);
+            json.Property("assetsWithIssuesCount", AssetsWithIssues.Count);
+
+            json.BeginObject("issueCounts");
+            foreach (MissingReferencesIssueKind kind in Enum.GetValues(typeof(MissingReferencesIssueKind)))
+            {
+                json.Property(kind.ToString(), CountIssues(kind));
+            }
+            json.EndObject();
+
+            json.BeginArray("assets");
+            foreach (var asset in Assets)
+            {
+                json.BeginObject();
+                json.Property("path", asset.Path);
+                json.Property("type", asset.TypeName);
+                json.Property("guid", asset.Guid);
+                json.Property("hasIssues", asset.HasIssues);
+
+                json.BeginArray("issues");
+                foreach (var issue in asset.Issues)
+                {
+                    json.BeginObject();
+                    json.Property("kind", issue.Kind.ToString());
+                    json.Property("line", issue.Line);
+                    json.Property("isWarning", issue.IsWarning);
+                    json.Property("details", issue.Details);
+                    json.EndObject();
+                }
+                json.EndArray();
+
+                json.EndObject();
+            }
+            json.EndArray();
+
+            json.EndObject();
+
+            return json.ToString();
+        }
+    }
+
+    /// <summary>
+    /// Entry point for using Missing References Hunter from code: tests, CI, build scripts.
+    /// </summary>
+    /// <example>
+    /// <code>
+    /// var report = MissingReferencesHunterApi.FindMissingReferences();
+    /// Assert.IsFalse(report.HasIssues, report.ToString());
+    /// </code>
+    /// Command line (exit code: 0 - no issues, 1 - issues found, 2 - analysis failed):
+    /// <code>
+    /// Unity -batchmode -projectPath . -executeMethod MissingReferencesHunter.MissingReferencesHunterApi.RunFromCommandLine -reportPath mrh-report.json
+    /// </code>
+    /// </example>
+    public static class MissingReferencesHunterApi
+    {
+        public const int ExitCodeNoIssues = 0;
+        public const int ExitCodeIssuesFound = 1;
+        public const int ExitCodeFailed = 2;
+
+        /// <summary>
+        /// Runs the same analysis as the "Run Analysis" button of the Missing References Hunter window.
+        /// Synchronous, no window is opened.
+        /// </summary>
+        public static MissingReferencesHunterReport FindMissingReferences(MissingReferencesHunterOptions options = null)
+        {
+            options ??= new MissingReferencesHunterOptions();
+
+            var stopWatch = System.Diagnostics.Stopwatch.StartNew();
+
+            var output = new MissingReferencesAnalysis.Output();
+
+            RunSynchronously(MissingReferencesAnalysis.Run(new MissingReferencesAnalysis.Settings
+            {
+                ScanMissingMethods = options.ScanMissingMethods,
+                ScanTypeMismatches = options.ScanTypeMismatches,
+                ScanMissingScripts = options.ScanMissingScripts,
+                ScanDuplicateComponents = options.ScanDuplicateComponents,
+                ScanInvalidLayers = options.ScanInvalidLayers,
+                IgnoredPatterns = options.IgnoredPatterns ?? MissingReferencesAnalysis.DefaultIgnorePatterns
+            }, output));
+
+            stopWatch.Stop();
+
+            var entries = output.Assets
+                .OrderBy(x => x.Path, StringComparer.Ordinal)
+                .Select(x => new MissingReferencesHunterReportEntry(x, options.IncludeFileIDIssues))
+                .Where(x => x.Issues.Count > 0)
+                .ToList();
+
+            return new MissingReferencesHunterReport(entries, output.Assets.Count, stopWatch.Elapsed.TotalSeconds);
+        }
+
+        /// <summary>
+        /// Use with -executeMethod. Quits the Editor with <see cref="ExitCodeNoIssues"/>,
+        /// <see cref="ExitCodeIssuesFound"/> or <see cref="ExitCodeFailed"/>.
+        /// Arguments:
+        /// -reportPath &lt;file&gt; - write the report as JSON;
+        /// -skipMissingMethods, -skipTypeMismatches, -skipMissingScripts, -skipDuplicateComponents,
+        /// -skipInvalidLayers - disable the matching window analysis settings (all enabled by default);
+        /// -includeFileIDIssues - also list informational FileID issues (do not affect the exit code).
+        /// </summary>
+        public static void RunFromCommandLine()
+        {
+            EditorApplication.Exit(ExecuteCommandLine(Environment.GetCommandLineArgs()));
+        }
+
+        /// <summary>
+        /// Same as <see cref="RunFromCommandLine"/> but returns the exit code instead of quitting.
+        /// </summary>
+        public static int ExecuteCommandLine(string[] args)
+        {
+            try
+            {
+                args ??= Array.Empty<string>();
+
+                var options = new MissingReferencesHunterOptions
+                {
+                    ScanMissingMethods = !CommandLineUtilities.HasFlag(args, "-skipMissingMethods"),
+                    ScanTypeMismatches = !CommandLineUtilities.HasFlag(args, "-skipTypeMismatches"),
+                    ScanMissingScripts = !CommandLineUtilities.HasFlag(args, "-skipMissingScripts"),
+                    ScanDuplicateComponents = !CommandLineUtilities.HasFlag(args, "-skipDuplicateComponents"),
+                    ScanInvalidLayers = !CommandLineUtilities.HasFlag(args, "-skipInvalidLayers"),
+                    IncludeFileIDIssues = CommandLineUtilities.HasFlag(args, "-includeFileIDIssues")
+                };
+
+                var report = FindMissingReferences(options);
+
+                var reportPath = CommandLineUtilities.GetValue(args, "-reportPath");
+                if (!string.IsNullOrEmpty(reportPath))
+                {
+                    CommandLineUtilities.WriteAllText(reportPath, report.ToJson());
+                }
+
+                CommandLineUtilities.Log(report.ToString());
+
+                return report.HasIssues ? ExitCodeIssuesFound : ExitCodeNoIssues;
+            }
+            catch (Exception e)
+            {
+                Debug.LogError($"Missing References Hunter analysis failed: {e}");
+                return ExitCodeFailed;
+            }
+        }
+
+        /// <summary>
+        /// Drives a coroutine to the end without EditorApplication.update (NUnit tests, -batchmode).
+        /// Nested IEnumerators are run in place; yielded floats are pauses for GC only and are skipped.
+        /// </summary>
+        private static void RunSynchronously(IEnumerator routine)
+        {
+            var stack = new Stack<IEnumerator>();
+            stack.Push(routine);
+
+            try
+            {
+                while (stack.Count > 0)
+                {
+                    var current = stack.Peek();
+
+                    if (!current.MoveNext())
+                    {
+                        stack.Pop();
+                        continue;
+                    }
+
+                    if (current.Current is IEnumerator nested)
+                    {
+                        stack.Push(nested);
+                    }
+                }
+            }
+            finally
+            {
+                while (stack.Count > 0)
+                {
+                    (stack.Pop() as IDisposable)?.Dispose();
+                }
+
+                EditorUtility.ClearProgressBar();
+            }
+        }
+    }
+
+    internal static class CommandLineUtilities
+    {
+        public static bool HasFlag(string[] args, string name)
+        {
+            return args.Any(x => string.Equals(x, name, StringComparison.OrdinalIgnoreCase));
+        }
+
+        public static string GetValue(string[] args, string name)
+        {
+            for (var i = 0; i < args.Length - 1; i++)
+            {
+                if (string.Equals(args[i], name, StringComparison.OrdinalIgnoreCase))
+                    return args[i + 1];
+            }
+
+            return null;
+        }
+
+        public static void WriteAllText(string path, string content)
+        {
+            var directory = Path.GetDirectoryName(Path.GetFullPath(path));
+            if (!string.IsNullOrEmpty(directory))
+                Directory.CreateDirectory(directory);
+
+            File.WriteAllText(path, content);
+        }
+
+        public static void Log(string message)
+        {
+            Debug.LogFormat(LogType.Log, LogOption.NoStacktrace, null, "{0}", message);
+        }
+    }
+
+    /// <summary>
+    /// Minimal indented JSON writer for reports (JsonUtility can't serialize properties or nested lists of strings
+    /// in a readable way).
+    /// </summary>
+    internal sealed class ReportJsonWriter
+    {
+        private readonly StringBuilder _sb = new StringBuilder();
+        private readonly Stack<bool> _hasItems = new Stack<bool>();
+
+        public void BeginObject(string name = null)
+        {
+            BeginItem(name);
+            _sb.Append('{');
+            _hasItems.Push(false);
+        }
+
+        public void EndObject()
+        {
+            EndScope('}');
+        }
+
+        public void BeginArray(string name = null)
+        {
+            BeginItem(name);
+            _sb.Append('[');
+            _hasItems.Push(false);
+        }
+
+        public void EndArray()
+        {
+            EndScope(']');
+        }
+
+        public void Property(string name, string value)
+        {
+            BeginItem(name);
+            AppendString(value);
+        }
+
+        public void Property(string name, bool value)
+        {
+            BeginItem(name);
+            _sb.Append(value ? "true" : "false");
+        }
+
+        public void Property(string name, long value)
+        {
+            BeginItem(name);
+            _sb.Append(value.ToString(System.Globalization.CultureInfo.InvariantCulture));
+        }
+
+        public void Property(string name, double value)
+        {
+            BeginItem(name);
+            _sb.Append(value.ToString("0.###", System.Globalization.CultureInfo.InvariantCulture));
+        }
+
+        public void StringArray(string name, IEnumerable<string> values)
+        {
+            BeginArray(name);
+            foreach (var value in values)
+            {
+                BeginItem(null);
+                AppendString(value);
+            }
+            EndArray();
+        }
+
+        public override string ToString()
+        {
+            return _sb.ToString();
+        }
+
+        private void BeginItem(string name)
+        {
+            if (_hasItems.Count > 0)
+            {
+                if (_hasItems.Pop())
+                    _sb.Append(',');
+                _hasItems.Push(true);
+
+                NewLine(_hasItems.Count);
+            }
+
+            if (name != null)
+            {
+                AppendString(name);
+                _sb.Append(": ");
+            }
+        }
+
+        private void EndScope(char closing)
+        {
+            var hadItems = _hasItems.Pop();
+            if (hadItems)
+                NewLine(_hasItems.Count);
+            _sb.Append(closing);
+        }
+
+        private void NewLine(int depth)
+        {
+            _sb.Append('\n');
+            _sb.Append(' ', depth * 2);
+        }
+
+        private void AppendString(string value)
+        {
+            if (value == null)
+            {
+                _sb.Append("null");
+                return;
+            }
+
+            _sb.Append('"');
+            foreach (var c in value)
+            {
+                switch (c)
+                {
+                    case '"': _sb.Append("\\\""); break;
+                    case '\\': _sb.Append("\\\\"); break;
+                    case '\n': _sb.Append("\\n"); break;
+                    case '\r': _sb.Append("\\r"); break;
+                    case '\t': _sb.Append("\\t"); break;
+                    default:
+                        if (c < ' ')
+                            _sb.Append("\\u").Append(((int)c).ToString("x4"));
+                        else
+                            _sb.Append(c);
+                        break;
+                }
+            }
+            _sb.Append('"');
         }
     }
 }
