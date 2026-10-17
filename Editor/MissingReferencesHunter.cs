@@ -95,6 +95,7 @@ namespace MissingReferencesHunter
             "m_PrefabInstance: {fileID:",
             "m_PrefabAsset: {fileID:",
             "m_GameObject: {fileID:",
+            "m_Script: {fileID:",
             "m_Icon: {fileID:",
             "m_Father: {fileID:"
         };
@@ -161,6 +162,9 @@ namespace MissingReferencesHunter
             Clear();
             Show();
 
+            var guidResolveCache = new Dictionary<string, bool>();
+            var fileIdCache = new Dictionary<string, HashSet<long>>();
+
             var assetPaths = AssetDatabase.GetAllAssetPaths().ToList();
 
             HashSet<int> validLayers = null;
@@ -171,7 +175,7 @@ namespace MissingReferencesHunter
 
             EditorUtility.ClearProgressBar();
             
-            var regexFileAndGuid = new Regex(@"fileID: \d+, guid: [a-f0-9]" + "{" + "32" + "}");
+            var regexFileAndGuid = new Regex(@"fileID: (\d+), guid: ([a-f0-9]{32})");
             var regexFileID = new Regex(@"{fileID: \d+}");
             var regexTypeStart = new Regex(@"^[a-zA-Z0-9_ ]+:");
             
@@ -278,23 +282,16 @@ namespace MissingReferencesHunter
                             for (var i = 0; i < guidMatches.Count; i++)
                             {
                                 var match = guidMatches[i];
-                                var str = match.Value;
 
-                                var localIdPart = str.Substring(7, str.IndexOf(",", StringComparison.Ordinal) - 7);
-                                localIdPart = localIdPart.Trim();
+                                long.TryParse(match.Groups[1].Value, out var localFileID);
+                                var externalGuid = match.Groups[2].Value;
 
-                                if (!long.TryParse(localIdPart, out var localFileID))
-                                {
-                                    Debug.LogWarning($"Unable to parse local id {localIdPart}");
-                                }
-
-                                var externalGuid = str.Substring(str.Length - 32);
                                 var guidValid = !externalGuid.StartsWith("0000000000");
                                 var localIdValid = localFileID > 0;
 
                                 if (!localIdValid && !guidValid)
                                 {
-                                    Debug.LogWarning($"Both local id and guid are invalid at {str}");
+                                    Debug.LogWarning($"Both local id and guid are invalid at line {index}");
                                     continue;
                                 }
 
@@ -306,13 +303,11 @@ namespace MissingReferencesHunter
 
                                 if (guidValid)
                                 {
-                                    var existsInAssets = _result.Guids.Contains(externalGuid) ||
-                                                         !string.IsNullOrEmpty(
-                                                             AssetDatabase.GUIDToAssetPath(externalGuid));
+                                    referenceData.GuidAssetPath = AssetDatabase.GUIDToAssetPath(externalGuid);
+                                    referenceData.GuidExistsInAssets = VerifyGuidResolves(
+                                        referenceData.GuidAssetPath, guidResolveCache);
 
-                                    referenceData.GuidExistsInAssets = existsInAssets;
-
-                                    if (!existsInAssets)
+                                    if (!referenceData.GuidExistsInAssets)
                                     {
                                         RecordGuidPlaceData(index, lines, referenceData);
                                         extendedPlaceDataRecorded = true;
@@ -417,6 +412,16 @@ namespace MissingReferencesHunter
                     {
                         registry.FileIDExistsInAssets = _result.FileIDs.Contains(registry.FileID)
                                                         || asset.RefsData.LocalReferences.Any(x => x.Id == registry.FileID);
+                    }
+
+                    if (registry.GuidValid && registry.GuidExistsInAssets && registry.FileIDValid)
+                    {
+                        var fileIds = GetFileIdsForPath(registry.GuidAssetPath, fileIdCache);
+                        registry.FileIDExistsInTargetAsset = fileIds != null && fileIds.Contains(registry.FileID);
+                    }
+                    else
+                    {
+                        registry.FileIDExistsInTargetAsset = true;
                     }
                 }
                 
@@ -541,6 +546,45 @@ namespace MissingReferencesHunter
                 return b == a || b.IsAssignableFrom(a);
 #endif
             }
+        }
+
+        private static bool VerifyGuidResolves(string guidPath, Dictionary<string, bool> cache)
+        {
+            if (string.IsNullOrEmpty(guidPath))
+                return false;
+
+            if (cache.TryGetValue(guidPath, out var cached))
+                return cached;
+
+            var asset = AssetDatabase.LoadAssetAtPath<Object>(guidPath);
+            var resolved = asset != null;
+            cache[guidPath] = resolved;
+            return resolved;
+        }
+
+        private static HashSet<long> GetFileIdsForPath(string assetPath, Dictionary<string, HashSet<long>> cache)
+        {
+            if (string.IsNullOrEmpty(assetPath))
+                return null;
+
+            if (cache.TryGetValue(assetPath, out var cached))
+                return cached;
+
+            HashSet<long> fileIds = null;
+            var allAssets = AssetDatabase.LoadAllAssetsAtPath(assetPath);
+            if (allAssets != null && allAssets.Length > 0)
+            {
+                fileIds = new HashSet<long>();
+                foreach (var subAsset in allAssets)
+                {
+                    if (subAsset == null) continue;
+                    if (AssetDatabase.TryGetGUIDAndLocalFileIdentifier(subAsset, out _, out long subFileId))
+                        fileIds.Add(subFileId);
+                }
+            }
+
+            cache[assetPath] = fileIds;
+            return fileIds;
         }
 
         private static void FindFieldType(Regex regexTypeStart, int index, string[] lines, ExternalReferenceRegistry referenceData)
@@ -1062,7 +1106,7 @@ namespace MissingReferencesHunter
             }
             
             var assetsWithMissingGuids = $"Missing Guid [{_result.MissingGuidCases}]: ";
-            GUI.color = _outputSettings.ShowMissingGuid ? Color.yellow : Color.gray;
+            GUI.color = _outputSettings.ShowMissingGuid ? Color.red : Color.gray;
             if (GUILayout.Button(assetsWithMissingGuids + (_outputSettings.ShowMissingGuid ? "Shown" : "Hidden")))
             {
                 _outputSettings.ShowMissingGuid = !_outputSettings.ShowMissingGuid;
@@ -1232,7 +1276,7 @@ namespace MissingReferencesHunter
                 prevColor = GUI.color;
                 GUI.color = asset.RefsData.MissingFileIDAndGuid > 0 ? Color.red : Color.white;
                 EditorGUILayout.LabelField("Missing FileID and Guid: " + asset.RefsData.MissingFileIDAndGuid, GUILayout.Width(160f));
-                GUI.color = asset.RefsData.MissingGuid > 0 ? Color.yellow : Color.white;
+                GUI.color = asset.RefsData.MissingGuid > 0 ? Color.red : Color.white;
                 EditorGUILayout.LabelField("Missing Guid: " + asset.RefsData.MissingGuid, GUILayout.Width(120f));
 
                 if (_enableMissingMethodScan)
@@ -1292,20 +1336,22 @@ namespace MissingReferencesHunter
                     {
                         foreach (var registry in asset.RefsData.ExternalReferences.Where(x => x.WarningLevel > 0))
                         {
-                            var fileIdIssue = registry.FileIDValid && !registry.FileIDExistsInAssets;
+                            var fileIdIssue = registry.GuidValid && registry.GuidExistsInAssets
+                                && registry.FileIDValid && !registry.FileIDExistsInTargetAsset;
                             var guidIssue = registry.GuidValid && !registry.GuidExistsInAssets;
                             
-                            if (!_outputSettings.ShowMissingFileID && !guidIssue)
+                            if (!_outputSettings.ShowMissingFileID && !guidIssue && !fileIdIssue)
                                 continue;
 
                             if (fileIdIssue)
                             {
-                                if (_outputSettings.ShowFileIDIssues || guidIssue)
+                                if (_outputSettings.ShowFileIDIssues || _outputSettings.ShowMissingGuid)
                                 {
                                     EditorGUILayout.BeginHorizontal();
                                     prevColor = GUI.color;
-                                    GUI.color = Color.yellow;
-                                    EditorGUILayout.LabelField($"Missing FileID {registry.FileID}");
+                                    GUI.color = Color.red;
+                                    EditorGUILayout.LabelField(
+                                        $"Broken FileID {registry.FileID} in '{registry.GuidAssetPath}'");
                                     GUI.color = prevColor;
                                     if (GUILayout.Button("Copy"))
                                     {
@@ -1325,8 +1371,8 @@ namespace MissingReferencesHunter
                             {
                                 EditorGUILayout.BeginHorizontal();
                                 prevColor = GUI.color;
-                                GUI.color = Color.yellow;
-                                EditorGUILayout.LabelField($"Missing GUID {registry.Guid}", GUILayout.Width(310f));
+                                GUI.color = Color.red;
+                                EditorGUILayout.LabelField($"Broken GUID {registry.Guid}", GUILayout.Width(310f));
                                 GUI.color = prevColor;
                                 if (GUILayout.Button("Copy"))
                                 {
@@ -1578,9 +1624,8 @@ namespace MissingReferencesHunter
         private void DrawInfoSection()
         {
             EditorGUILayout.LabelField("* [Missing FileID and Guid] - in 100% of cases indicates an error");
-            EditorGUILayout.LabelField("* [Missing Guid] - most likely indicates an error");
-            EditorGUILayout.LabelField("Sometimes missing GUID can be compensated by FileID so we are not 100% that there is a problem");
-            EditorGUILayout.LabelField("However the tool still marks it as a warning for you to investigate");
+            EditorGUILayout.LabelField("* [Missing Guid] - GUID does not resolve to a loadable asset (treated as error)");
+            EditorGUILayout.LabelField("* [Missing FileId] - FileID not found in the referenced target asset (when GUID resolves)");
             
             EditorGUILayout.LabelField("* Other FileID issues most likely do not indicate errors and are hidden by default");
             
@@ -1607,15 +1652,12 @@ namespace MissingReferencesHunter
             EditorGUILayout.LabelField("[Missing FileID and Guid] - both identifiers do not exist");
             EditorGUILayout.LabelField("* in that case we are 100% sure that there is a missing reference so we mark it with red color");
                 
-            GUI.color = Color.yellow;
+            GUI.color = Color.red;
                 
-            EditorGUILayout.LabelField("[Missing Guid] - only Guid does not exist");
-            EditorGUILayout.LabelField("[Missing FileId] - only FileId does not exist");
+            EditorGUILayout.LabelField("[Missing Guid] - GUID does not resolve to a loadable asset");
+            EditorGUILayout.LabelField("[Missing FileId] - FileID not found in the referenced target asset");
                 
-            EditorGUILayout.LabelField("* this issues need further investigation by you");
-            EditorGUILayout.LabelField("* there might be or not a missing reference since it can be somehow processed by some internal Unity code");
-            EditorGUILayout.LabelField("* however [Missing Guid] most of the times indicates that there are some errors so we mark it as yellow");
-            EditorGUILayout.LabelField("* [Missing FileId] usually involves more internal nuances and less likely indicates an error and so we mark it as non-warning (cyan)");
+            EditorGUILayout.LabelField("* both indicate broken PPtr references and are marked red");
                 
             GUI.color = Color.white;
                 
@@ -1828,6 +1870,8 @@ namespace MissingReferencesHunter
         public List<string> Sample { get; } = new List<string>();
         public bool FileIDExistsInAssets { get; set; }
         public bool GuidExistsInAssets { get; set; }
+        public string GuidAssetPath { get; set; }
+        public bool FileIDExistsInTargetAsset { get; set; }
         public string HolderName { get; set; }
         
         public int WarningLevel { get; private set; }
@@ -1840,6 +1884,9 @@ namespace MissingReferencesHunter
                 WarningLevel++;
 
             if (GuidValid && !GuidExistsInAssets)
+                WarningLevel++;
+
+            if (GuidValid && GuidExistsInAssets && FileIDValid && !FileIDExistsInTargetAsset)
                 WarningLevel++;
         }
     }
@@ -1868,7 +1915,8 @@ namespace MissingReferencesHunter
         {
             MissingFileIDAndGuid = ExternalReferences.Count(x => x.FileIDValid && x.GuidValid && !x.FileIDExistsInAssets && !x.GuidExistsInAssets);
             MissingGuid = ExternalReferences.Count(x => x.GuidValid && !x.GuidExistsInAssets);
-            MissingFileID = ExternalReferences.Count(x => x.FileIDValid && !x.FileIDExistsInAssets && LocalReferences.All(l => l.Id != x.FileID));
+            MissingFileID = ExternalReferences.Count(x =>
+                x.GuidValid && x.GuidExistsInAssets && x.FileIDValid && !x.FileIDExistsInTargetAsset);
             MissingLocalFileID = LocalReferences.Count(x => x.IdValid && x.LocalUsagesCount == 0 && !x.ExistsInAssets);
 
             foreach (var registry in ExternalReferences)
